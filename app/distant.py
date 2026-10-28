@@ -102,7 +102,56 @@ def create_house(password: str, url: str | None = None) -> dict:
     if len(house) != 8 or not token:
         raise ValueError("La page publique n'a pas créé la maison.")
     save_link(target, house, token)
-    return {"url": target, "house": house, "code": format_house(house)}
+    return {
+        "url": target,
+        "house": house,
+        "code": format_house(house),
+        "secret": str(data.get("secret") or ""),
+        "qr": str(data.get("qr") or ""),
+    }
+
+
+def _agent_json(path: str, payload: dict) -> dict:
+    cfg = load_config()
+    if cfg is None:
+        raise ValueError("Cette maison n'est pas reliée.")
+    req = urllib.request.Request(
+        cfg["url"] + path,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + cfg["token"],
+            "X-House": cfg["house"],
+            "Content-Type": "application/json",
+            "User-Agent": "maMaison/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = str(payload.get("detail") or "")
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            detail = ""
+        raise ValueError(detail or "La page publique n'a pas répondu.") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise ValueError("La page publique n'a pas répondu.") from exc
+
+
+def confirm_totp(code: str) -> None:
+    _agent_json("/api/totp", {"code": code})
+
+
+def rotate_totp() -> dict:
+    data = _agent_json("/api/totp", {"rotate": True})
+    return {
+        "house": format_house(load_config()["house"]),
+        "secret": str(data.get("secret") or ""),
+        "qr": str(data.get("qr") or ""),
+    }
 
 
 def allowed(method: str, path: str) -> bool:

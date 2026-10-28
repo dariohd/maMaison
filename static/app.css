@@ -410,6 +410,20 @@ textarea { resize: vertical; }
   margin: 8px 0;
 }
 
+.secret-key {
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  word-break: break-all;
+}
+
+.qr {
+  width: fit-content;
+  background: #fff;
+  padding: 8px;
+}
+
+.qr svg { display: block; width: 220px; height: auto; }
+
 .name-btn {
   background: none;
   border: 0;

@@ -1,5 +1,7 @@
+import QRCode from "qrcode";
 import { hashPassword, hashToken, newToken } from "../lib/secrets.js";
 import { formatHouse, load, newHouseId, save } from "../lib/store.js";
+import { generateSecret, otpauth } from "../lib/totp.js";
 
 const PUBLIC_URL = "https://mamaison-dariohprojects.vercel.app";
 
@@ -38,13 +40,21 @@ export default async function handler(req, res) {
     id = newHouseId();
   }
   const token = newToken();
+  const secret = generateSecret();
+  const code = formatHouse(id);
   await save({
     id,
     passwordHash: hashPassword(password),
     agentTokenHash: hashToken(token),
+    totpSecret: secret,
+    totpReady: false,
+    lastTotpStep: 0,
+    loginFailures: 0,
+    loginLockedUntil: 0,
     snapshot: null,
     seenAt: 0,
     queue: [],
   });
-  send(res, 200, { id, code: formatHouse(id), token, url: PUBLIC_URL });
+  const qr = await QRCode.toString(otpauth(secret, code), { type: "svg", margin: 1, width: 220 });
+  send(res, 200, { id, code, token, url: PUBLIC_URL, secret, qr });
 }

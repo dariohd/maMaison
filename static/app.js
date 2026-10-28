@@ -1275,8 +1275,8 @@ function renderInstall() {
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Installer le programme</h2>
-      <p>Chaque maison se crée sur place. Installe maMaison sur un ordinateur qui est sur le Wi-Fi de cette maison, choisis un mot de passe, et laisse la fenêtre ouverte.</p>
-      <p>Le programme affiche un code. Sur le téléphone, entre ce code et le mot de passe choisi là-bas.</p>
+      <p>Chaque maison se crée sur place. Installe maMaison sur un ordinateur du Wi-Fi, choisis un mot de passe, et ajoute le carré dans une application d'authentification.</p>
+      <p>Sur le téléphone : le code de la maison, le mot de passe, puis les 6 chiffres qui changent toutes les 30 secondes.</p>
       <a class="btn primary" href="${RELEASE}">Télécharger maMaison pour Windows</a>
       <p class="help">Dès que l'ordinateur est relié, le tableau de bord s'affiche ici.</p>
     </article>`;
@@ -1317,28 +1317,86 @@ function renderCreate() {
     }
     try {
       const linked = await api("/api/link", { method: "POST", body: { password } });
-      renderReady(linked.house || "");
+      rememberSetup(linked);
+      renderReady(linked);
     } catch (error) {
       if (box) box.textContent = error.message;
     }
   });
 }
 
-function renderReady(code) {
+function rememberSetup(linked) {
+  const pending = {
+    house: linked.house || "",
+    secret: linked.secret || "",
+    qr: linked.qr || "",
+    confirmed: false,
+  };
+  sessionStorage.setItem("maison-setup", JSON.stringify(pending));
+  return pending;
+}
+
+function pendingSetup() {
+  try {
+    const raw = sessionStorage.getItem("maison-setup");
+    return raw ? JSON.parse(raw) : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function qrMarkup(svg) {
+  if (typeof svg !== "string" || !svg.includes("<svg") || svg.toLowerCase().includes("<script")) return "";
+  return svg;
+}
+
+function renderReady(linked) {
+  const code = linked.house || "";
+  const secret = linked.secret || "";
   state.view = "link";
   state.houseCode = code;
   const title = document.getElementById("view-title");
-  if (title) title.textContent = "Maison créée";
+  if (title) title.textContent = "Application d'authentification";
   viewEl().innerHTML = `
     <article class="card login-card">
-      <h2>Cette maison a son code</h2>
-      <p>Sur le téléphone, ouvre la page. Entre ce code et le mot de passe que tu viens de choisir. Laisse cette fenêtre ouverte.</p>
+      <h2>Ajoute le second code</h2>
+      <p>Sur le téléphone, ouvre une application d'authentification (celle de Google, de Microsoft, ou celle déjà installée). Scanne le carré, ou copie la clé.</p>
+      <div class="qr">${qrMarkup(linked.qr)}</div>
+      <p class="secret-key">${esc(secret)}</p>
+      <p>Code de la maison</p>
       <p class="house-code">${esc(code)}</p>
-      <button type="button" class="btn primary" id="open-console">Ouvrir la console</button>
+      <form id="otp-form">
+        <label>Les 6 chiffres affichés par l'application
+          <input name="otp" inputmode="numeric" autocomplete="one-time-code" required>
+        </label>
+        <p class="form-error" id="otp-error"></p>
+        <button class="btn primary" type="submit">Vérifier</button>
+      </form>
+      <button type="button" class="btn" id="new-qr">Nouveau carré</button>
     </article>`;
-  document.getElementById("open-console").addEventListener("click", async () => {
-    state.view = "dashboard";
-    await boot();
+  document.getElementById("otp-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const otp = new FormData(event.target).get("otp");
+    try {
+      await api("/api/link/confirm", { method: "POST", body: { code: otp } });
+      sessionStorage.removeItem("maison-setup");
+      state.view = "dashboard";
+      await boot();
+    } catch (error) {
+      const box = document.getElementById("otp-error");
+      if (box) box.textContent = error.message;
+    }
+  });
+  document.getElementById("new-qr").addEventListener("click", async () => {
+    try {
+      const fresh = await api("/api/link/totp", { method: "POST", body: {} });
+      fresh.house = fresh.house || code;
+      rememberSetup(fresh);
+      renderReady(fresh);
+    } catch (error) {
+      const box = document.getElementById("otp-error");
+      if (box) box.textContent = error.message;
+    }
   });
 }
 
@@ -1354,13 +1412,16 @@ function renderLogin() {
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Entrer dans la maison</h2>
-      <p>Le code est affiché par le programme ouvert sur l'ordinateur de cette maison. Le mot de passe est celui choisi à ce moment-là.</p>
+      <p>Le code de la maison est sur l'ordinateur du Wi-Fi. Le mot de passe est celui choisi là-bas. Les 6 chiffres viennent de l'application d'authentification, et changent toutes les 30 secondes.</p>
       <form id="login-form">
         <label>Code de la maison
           <input name="house" autocapitalize="characters" autocomplete="off" required>
         </label>
         <label>Mot de passe
           <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <label>Code de l'application
+          <input name="otp" inputmode="numeric" autocomplete="one-time-code" required>
         </label>
         <p class="form-error" id="login-error"></p>
         <button class="btn primary" type="submit">Entrer</button>
@@ -1370,7 +1431,7 @@ function renderLogin() {
     event.preventDefault();
     const form = new FormData(event.target);
     try {
-      await api("/api/login", { method: "POST", body: { house: form.get("house"), password: form.get("password") } });
+      await api("/api/login", { method: "POST", body: { house: form.get("house"), password: form.get("password"), otp: form.get("otp") } });
       state.view = "dashboard";
       await boot();
     } catch (error) {
@@ -1396,7 +1457,13 @@ async function boot() {
       const link = await api("/api/link");
       state.houseCode = link.house || state.houseCode || "";
       if (!link.linked) {
+        sessionStorage.removeItem("maison-setup");
         renderCreate();
+        return;
+      }
+      const pending = pendingSetup();
+      if (pending && pending.house === link.house && pending.secret) {
+        renderReady(pending);
         return;
       }
     }

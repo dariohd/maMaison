@@ -101,6 +101,10 @@ class LinkBody(BaseModel):
     password: str = ""
 
 
+class TotpBody(BaseModel):
+    code: str = ""
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init_db()
@@ -323,7 +327,31 @@ def link_house(body: LinkBody):
         created = distant.create_house(body.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "url": created["url"], "house": created["code"]}
+    return {
+        "ok": True,
+        "url": created["url"],
+        "house": created["code"],
+        "secret": created["secret"],
+        "qr": created["qr"],
+    }
+
+
+@app.post("/api/link/confirm")
+def link_confirm(body: TotpBody):
+    try:
+        distant.confirm_totp(body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/link/totp")
+def link_rotate():
+    try:
+        fresh = distant.rotate_totp()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return fresh
 
 
 @app.put("/api/settings")
