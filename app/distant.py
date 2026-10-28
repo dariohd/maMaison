@@ -11,7 +11,7 @@ import urllib.request
 from app import commands, db, scanner
 
 log = logging.getLogger("maison.distant")
-PUBLIC_URL = "https://mamaison-dariohprojects.vercel.app"
+PUBLIC_URL = "https://mamaisonconnectee.vercel.app"
 _stop = threading.Event()
 _wake = threading.Event()
 _thread: threading.Thread | None = None
@@ -54,7 +54,7 @@ def format_house(house: str) -> str:
 def public_url(url: str | None = None) -> str:
     target = (url or PUBLIC_URL).strip()
     parsed = urllib.parse.urlparse(target)
-    if parsed.scheme != "https" or parsed.hostname != "mamaison-dariohprojects.vercel.app":
+    if parsed.scheme != "https" or parsed.hostname != "mamaisonconnectee.vercel.app":
         raise ValueError("Adresse refusée")
     if parsed.path not in ("", "/"):
         raise ValueError("Adresse refusée")
@@ -80,7 +80,7 @@ def create_house(password: str, url: str | None = None) -> dict:
         data=json.dumps({"password": password}).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "maMaison/1.0",
+            "User-Agent": "maMaisonConnectee/1.0",
         },
         method="POST",
     )
@@ -122,7 +122,7 @@ def _agent_json(path: str, payload: dict) -> dict:
             "Authorization": "Bearer " + cfg["token"],
             "X-House": cfg["house"],
             "Content-Type": "application/json",
-            "User-Agent": "maMaison/1.0",
+            "User-Agent": "maMaisonConnectee/1.0",
         },
         method="POST",
     )
@@ -235,7 +235,7 @@ def _post(cfg: dict, payload: dict) -> dict:
             "Authorization": "Bearer " + cfg["token"],
             "X-House": cfg["house"],
             "Content-Type": "application/json",
-            "User-Agent": "maMaison/1.0",
+            "User-Agent": "maMaisonConnectee/1.0",
         },
         method="POST",
     )

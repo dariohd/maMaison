@@ -27,7 +27,7 @@ const PROTOCOLS = [
   ["tcp", "TCP, port précis"],
 ];
 
-const RELEASE = "https://github.com/dariohd/maMaison/releases/latest/download/maMaison.exe";
+const RELEASE = "https://github.com/dariohd/maMaison/releases/latest/download/maMaisonConnectee.exe";
 
 const state = {
   view: "dashboard",
@@ -160,7 +160,7 @@ function paintChrome() {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === state.view);
   });
-  document.getElementById("view-title").textContent = TITLES[state.view] || "maMaison";
+  document.getElementById("view-title").textContent = TITLES[state.view] || "maMaisonConnectee";
   const subnet = subnetDefault();
   document.getElementById("eyebrow").textContent = subnet ? `Réseau ${subnet}` : "Réseau de la maison";
   const meta = [];
@@ -206,7 +206,7 @@ function renderDashboard() {
     ? ""
     : house.online
       ? `<p class="house-note">L'ordinateur de la maison répond. Les boutons partent depuis ce téléphone.</p>`
-      : `<p class="house-note">L'ordinateur de cette maison ne répond pas. Ouvre maMaison sur son Wi-Fi et laisse la fenêtre ouverte. <a href="${RELEASE}">Télécharger le programme</a> s'il n'est pas encore là.</p>`;
+      : `<p class="house-note">L'ordinateur de cette maison ne répond pas. Ouvre maMaisonConnectee sur son Wi-Fi et laisse la fenêtre ouverte. <a href="${RELEASE}">Télécharger le programme</a> s'il n'est pas encore là.</p>`;
   const attention = data.attention || [];
   const devices = data.devices || [];
   const bars = (data.by_type || []).map((item) => {
@@ -993,7 +993,7 @@ document.body.addEventListener("click", async (event) => {
   }
   if (action === "show-stream") {
     if (location.hostname.endsWith(".vercel.app")) {
-      toast("L'image se regarde sur le Wi-Fi de la maison, depuis l'ordinateur où maMaison est ouvert.");
+      toast("L'image se regarde sur le Wi-Fi de la maison, depuis l'ordinateur où maMaisonConnectee est ouvert.");
       return;
     }
     state.viewer = {
@@ -1275,9 +1275,9 @@ function renderInstall() {
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Installer le programme</h2>
-      <p>Chaque maison se crée sur place. Installe maMaison sur un ordinateur du Wi-Fi, choisis un mot de passe, et ajoute le carré dans une application d'authentification.</p>
+      <p>Chaque maison se crée sur place. Installe maMaisonConnectee sur un ordinateur du Wi-Fi, choisis un mot de passe, et ajoute le carré dans une application d'authentification.</p>
       <p>Sur le téléphone : le code de la maison, le mot de passe, puis les 6 chiffres qui changent toutes les 30 secondes.</p>
-      <a class="btn primary" href="${RELEASE}">Télécharger maMaison pour Windows</a>
+      <a class="btn primary" href="${RELEASE}">Télécharger maMaisonConnectee pour Windows</a>
       <p class="help">Dès que l'ordinateur est relié, le tableau de bord s'affiche ici.</p>
     </article>`;
 }

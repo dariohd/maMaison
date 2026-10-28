@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title maMaison
+title maMaisonConnectee
 if not exist ".venv\Scripts\python.exe" (
   echo Preparation de la console...
   python -m venv .venv

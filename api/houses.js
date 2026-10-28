@@ -3,7 +3,7 @@ import { hashPassword, hashToken, newToken } from "../lib/secrets.js";
 import { formatHouse, load, newHouseId, save } from "../lib/store.js";
 import { generateSecret, otpauth } from "../lib/totp.js";
 
-const PUBLIC_URL = "https://mamaison-dariohprojects.vercel.app";
+const PUBLIC_URL = "https://mamaisonconnectee.vercel.app";
 
 function send(res, code, body) {
   res.statusCode = code;

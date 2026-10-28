@@ -176,7 +176,7 @@ def _request(device: dict, action: dict, timeout: float):
     if action["kind"] == "http" and method not in {"GET", "DELETE"}:
         data = (action.get("body") or "").encode("utf-8")
     request = urllib.request.Request(url, data=data, method=method)
-    request.add_header("User-Agent", "maMaison/1.0")
+    request.add_header("User-Agent", "maMaisonConnectee/1.0")
     request.add_header("Connection", "close")
     if action.get("auth_user"):
         token = base64.b64encode(

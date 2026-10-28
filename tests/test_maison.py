@@ -283,7 +283,7 @@ def test_distant_refuses_another_site():
         assert "refus" in str(exc).lower()
     else:
         raise AssertionError("site externe")
-    assert distant.public_url("https://mamaison-dariohprojects.vercel.app") == "https://mamaison-dariohprojects.vercel.app"
+    assert distant.public_url("https://mamaisonconnectee.vercel.app") == "https://mamaisonconnectee.vercel.app"
 
 
 def test_each_house_has_its_own_link():
@@ -294,11 +294,11 @@ def test_each_house_has_its_own_link():
     else:
         raise AssertionError("mot de passe trop court")
     assert distant.parse_config({
-        "url": "https://mamaison-dariohprojects.vercel.app",
+        "url": "https://mamaisonconnectee.vercel.app",
         "token": "secret",
     }) is None
     parsed = distant.parse_config({
-        "url": "https://mamaison-dariohprojects.vercel.app",
+        "url": "https://mamaisonconnectee.vercel.app",
         "token": "secret",
         "house": "ab12-cd34",
     })

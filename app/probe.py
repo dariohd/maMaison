@@ -75,7 +75,7 @@ def http_probe(ip: str, port: int, path: str, https: bool, timeout: float) -> tu
         request = urllib.request.Request(
             url,
             method=method,
-            headers={"User-Agent": "maMaison/1.0", "Connection": "close"},
+            headers={"User-Agent": "maMaisonConnectee/1.0", "Connection": "close"},
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:

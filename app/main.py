@@ -118,7 +118,7 @@ async def lifespan(_app: FastAPI):
     monitor.stop()
 
 
-app = FastAPI(title="maMaison", lifespan=lifespan)
+app = FastAPI(title="maMaisonConnectee", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC), name="assets")
 
 

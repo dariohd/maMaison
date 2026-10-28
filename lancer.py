@@ -4,7 +4,7 @@ import sys
 import threading
 import webbrowser
 
-PUBLIC_URL = "https://mamaison-dariohprojects.vercel.app"
+PUBLIC_URL = "https://mamaisonconnectee.vercel.app"
 
 
 def port_free(port: int) -> bool:
@@ -30,11 +30,11 @@ def open_page() -> None:
 def main() -> None:
     os.environ.setdefault("PYTHONUTF8", "1")
     port = int(os.environ.get("MAISON_PORT", "8787"))
-    print("maMaison")
+    print("maMaisonConnectee")
     print("Laissez cette fenetre ouverte.")
     print("Le telephone utilise : " + PUBLIC_URL)
     if not port_free(port):
-        print("maMaison est deja ouvert sur cet ordinateur.")
+        print("maMaisonConnectee est deja ouvert sur cet ordinateur.")
         input("Appuyez sur Entree pour fermer.")
         return
     if os.environ.get("MAISON_OPEN_BROWSER", "1") != "0":
