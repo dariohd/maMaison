@@ -27,6 +27,8 @@ const PROTOCOLS = [
   ["tcp", "TCP, port précis"],
 ];
 
+const RELEASE = "https://github.com/dariohd/maMaison/releases/latest/download/maMaison.exe";
+
 const state = {
   view: "dashboard",
   devices: [],
@@ -200,9 +202,11 @@ function renderDashboard() {
   }
   const counts = data.counts || {};
   const house = data.house;
-  const houseNote = house
-    ? `<p class="house-note">${house.online ? "L'ordinateur de la maison répond. Les boutons partent depuis ce téléphone." : "L'ordinateur de la maison ne répond pas. Allumez-le et laissez la fenêtre noire ouverte."}</p>`
-    : "";
+  const houseNote = !house
+    ? ""
+    : house.online
+      ? `<p class="house-note">L'ordinateur de la maison répond. Les boutons partent depuis ce téléphone.</p>`
+      : `<p class="house-note">L'ordinateur de la maison ne répond pas. Ouvre maMaison sur cet ordinateur et laisse la fenêtre ouverte. <a href="${RELEASE}">Télécharger le programme</a> s'il n'est pas encore là.</p>`;
   const attention = data.attention || [];
   const devices = data.devices || [];
   const bars = (data.by_type || []).map((item) => {
@@ -491,6 +495,10 @@ function renderSettings() {
 
 function render() {
   paintChrome();
+  if (needsProgram(state.dashboard) && (state.view === "dashboard" || state.view === "install")) {
+    renderInstall();
+    return;
+  }
   if (state.view === "dashboard") renderDashboard();
   else if (state.view === "devices") renderDevices();
   else if (state.view === "scan") renderScan();
@@ -873,16 +881,26 @@ async function applyScan() {
 }
 
 async function poll() {
-  if (state.view === "login" || state.modal) return;
+  if (state.view === "login" || state.view === "link" || state.modal) return;
   const active = document.activeElement;
   const typing = active && viewEl().contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
   if (typing) return;
   try {
-    if (state.view === "dashboard") {
+    if (state.view === "dashboard" || state.view === "install") {
       const dashboard = await api("/api/dashboard");
       const key = JSON.stringify(dashboard);
       state.dashboard = dashboard;
       state.devices = dashboard.devices || state.devices;
+      if (needsProgram(dashboard)) {
+        if (state.view !== "install") renderInstall();
+        return;
+      }
+      if (state.view === "install") {
+        state.view = "dashboard";
+        state.dashKey = key;
+        render();
+        return;
+      }
       if (key !== state.dashKey) {
         state.dashKey = key;
         const scroll = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
@@ -1231,8 +1249,62 @@ let polling = false;
 function paintPlace() {
   const foot = document.querySelector(".aside-foot");
   if (foot && location.hostname.endsWith(".vercel.app")) {
-    foot.textContent = "Ouverte depuis internet. L'ordinateur de la maison doit rester allumé.";
+    foot.innerHTML = `Ouvre maMaison sur l'ordinateur de la maison. <a href="${RELEASE}">Télécharger</a>`;
   }
+}
+
+function onHouseComputer() {
+  return location.hostname === "127.0.0.1" || location.hostname === "localhost";
+}
+
+function needsProgram(dashboard) {
+  return Boolean(dashboard && dashboard.house && !dashboard.house.at);
+}
+
+function renderInstall() {
+  state.view = "install";
+  paintPlace();
+  const title = document.getElementById("view-title");
+  if (title) title.textContent = "Installation";
+  viewEl().innerHTML = `
+    <article class="card login-card">
+      <h2>Installer le programme</h2>
+      <p>Cette page est la télécommande. Elle ne voit pas les appareils tant que maMaison n'est pas ouvert sur un ordinateur de la maison.</p>
+      <p>Télécharge le programme, ouvre-le, entre le même mot de passe que sur cette page, puis laisse la fenêtre ouverte.</p>
+      <a class="btn primary" href="${RELEASE}">Télécharger maMaison pour Windows</a>
+      <p class="help">Dès que l'ordinateur est relié, le tableau de bord s'affiche ici.</p>
+    </article>`;
+}
+
+function renderLink() {
+  state.view = "link";
+  const title = document.getElementById("view-title");
+  if (title) title.textContent = "Relier la maison";
+  viewEl().innerHTML = `
+    <article class="card login-card">
+      <h2>Relier cet ordinateur</h2>
+      <p>Entre le mot de passe de la page maMaison. C'est le même que sur le téléphone. Ensuite, laisse cette fenêtre ouverte.</p>
+      <form id="link-form">
+        <label>Mot de passe de la page
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <p class="form-error" id="link-error"></p>
+        <button class="btn primary" type="submit">Relier</button>
+      </form>
+    </article>`;
+  document.getElementById("link-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const password = new FormData(event.target).get("password");
+    try {
+      const linked = await api("/api/link", { method: "POST", body: { password } });
+      if (linked.url) window.open(linked.url, "_blank");
+      state.view = "dashboard";
+      await boot();
+    } catch (error) {
+      const box = document.getElementById("link-error");
+      if (box) box.textContent = error.message;
+    }
+  });
 }
 
 function renderLogin() {
@@ -1277,10 +1349,17 @@ async function finishCommand(result) {
 
 async function boot() {
   try {
+    if (onHouseComputer()) {
+      const link = await api("/api/link");
+      if (!link.linked) {
+        renderLink();
+        return;
+      }
+    }
     await hydrate();
     state.scan = await api("/api/scan");
     state.scanning = state.scan.state === "running";
-    if (state.view === "login") state.view = "dashboard";
+    if (state.view === "login" || state.view === "link") state.view = "dashboard";
     paintPlace();
     render();
     if (!polling) {

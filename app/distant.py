@@ -5,12 +5,15 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from app import commands, db, scanner
 
 log = logging.getLogger("maison.distant")
+PUBLIC_URL = "https://mamaison-dariohprojects.vercel.app"
 _stop = threading.Event()
+_wake = threading.Event()
 _thread: threading.Thread | None = None
 _done: dict[str, dict] = {}
 _network = {"at": 0.0, "value": None}
@@ -35,6 +38,53 @@ def load_config() -> dict | None:
     if not url.startswith("https://") or not token:
         return None
     return {"url": url, "token": token}
+
+
+def public_url(url: str | None = None) -> str:
+    target = (url or PUBLIC_URL).strip()
+    parsed = urllib.parse.urlparse(target)
+    if parsed.scheme != "https" or parsed.hostname != "mamaison-dariohprojects.vercel.app":
+        raise ValueError("Adresse refusée")
+    if parsed.path not in ("", "/"):
+        raise ValueError("Adresse refusée")
+    return f"https://{parsed.hostname}"
+
+
+def save_link(url: str, token: str) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"url": url, "token": token}, indent=2),
+        encoding="utf-8",
+    )
+    wake()
+
+
+def link_with_password(password: str, url: str | None = None) -> str:
+    target = public_url(url)
+    req = urllib.request.Request(
+        target + "/api/pair",
+        data=json.dumps({"password": password}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "maMaison/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise ValueError("Mot de passe incorrect.") from exc
+        raise ValueError("La page publique n'a pas répondu.") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise ValueError("La page publique n'a pas répondu.") from exc
+    token = str(data.get("token") or "")
+    if not token:
+        raise ValueError("La page publique n'a pas donné de lien.")
+    save_link(target, token)
+    return target
 
 
 def allowed(method: str, path: str) -> bool:
@@ -138,13 +188,13 @@ def _loop() -> None:
     while not _stop.is_set():
         cfg = load_config()
         if cfg is None:
-            _stop.wait(15)
+            _pause(15)
             continue
         try:
             _cycle(cfg, [])
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
             log.exception("lien avec la page publique")
-        _stop.wait(8)
+        _pause(8)
 
 
 def start() -> None:
@@ -158,7 +208,17 @@ def start() -> None:
     _thread.start()
 
 
+def wake() -> None:
+    _wake.set()
+
+
+def _pause(seconds: float) -> None:
+    _wake.wait(seconds)
+    _wake.clear()
+
+
 def stop() -> None:
     _stop.set()
+    wake()
     if _thread is not None:
         _thread.join(timeout=2)

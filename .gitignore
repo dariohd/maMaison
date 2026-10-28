@@ -7,3 +7,5 @@ data/*.db-*
 .pytest_cache/
 node_modules/
 data/distant.json
+build/
+dist/

@@ -396,6 +396,15 @@ textarea { resize: vertical; }
   gap: 12px;
 }
 
+.login-card a.btn {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  text-decoration: none;
+}
+
+.house-note a, .aside-foot a { color: inherit; }
+
 .name-btn {
   background: none;
   border: 0;

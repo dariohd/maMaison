@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from app.paths import home_root
+
+ROOT = home_root()
 
 DEFAULTS = {
     "subnet": "",

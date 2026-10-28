@@ -276,6 +276,16 @@ def test_distant_allows_only_house_commands():
     assert blocked["ok"] is False
 
 
+def test_distant_refuses_another_site():
+    try:
+        distant.public_url("https://example.com/pair")
+    except ValueError as exc:
+        assert "refus" in str(exc).lower()
+    else:
+        raise AssertionError("site externe")
+    assert distant.public_url("https://mamaison-dariohprojects.vercel.app") == "https://mamaison-dariohprojects.vercel.app"
+
+
 def test_ping_localhost():
     ok, latency = probe.ping("127.0.0.1", 400)
     assert ok is True

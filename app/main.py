@@ -12,10 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import commands, db, distant, monitor, probe, scanner
+from app.paths import resource_root
 
 log = logging.getLogger("maison")
-ROOT = db.ROOT
-STATIC = ROOT / "static"
+STATIC = resource_root() / "static"
 PROTOCOLS = {"ping", "http", "https", "tcp", "rtsp"}
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
@@ -95,6 +95,10 @@ class ApplyBody(BaseModel):
     creates: list[CreateItem] = Field(default_factory=list)
     updates: list[UpdateItem] = Field(default_factory=list)
     force: bool = False
+
+
+class LinkBody(BaseModel):
+    password: str = ""
 
 
 @asynccontextmanager
@@ -301,6 +305,22 @@ def settings():
         "poll_interval_s": db.get_int_setting("poll_interval_s", 30),
         "http_timeout_s": db.get_int_setting("http_timeout_s", 2),
     }
+
+
+@app.get("/api/link")
+def link_state():
+    cfg = distant.load_config()
+    return {"linked": cfg is not None, "url": distant.PUBLIC_URL}
+
+
+@app.post("/api/link")
+def link_house(body: LinkBody):
+    try:
+        url = distant.link_with_password(body.password)
+    except ValueError as exc:
+        status = 401 if "incorrect" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"ok": True, "url": url}
 
 
 @app.put("/api/settings")
