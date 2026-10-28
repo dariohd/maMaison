@@ -5,3 +5,5 @@ data/*.db
 data/*.db-*
 *.pyc
 .pytest_cache/
+node_modules/
+data/distant.json

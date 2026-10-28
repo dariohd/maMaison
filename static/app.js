@@ -199,6 +199,10 @@ function renderDashboard() {
     return;
   }
   const counts = data.counts || {};
+  const house = data.house;
+  const houseNote = house
+    ? `<p class="house-note">${house.online ? "L'ordinateur de la maison répond. Les boutons partent depuis ce téléphone." : "L'ordinateur de la maison ne répond pas. Allumez-le et laissez la fenêtre noire ouverte."}</p>`
+    : "";
   const attention = data.attention || [];
   const devices = data.devices || [];
   const bars = (data.by_type || []).map((item) => {
@@ -222,6 +226,7 @@ function renderDashboard() {
   `).join("");
   const visible = devices.filter((device) => state.dashStatus === "all" || device.state === state.dashStatus);
   viewEl().innerHTML = `
+    ${houseNote}
     <section class="stats">
       <article class="stat"><span>Appareils</span><b>${counts.total || 0}</b></article>
       <article class="stat online"><span>En ligne</span><b>${counts.online || 0}</b></article>
@@ -868,7 +873,7 @@ async function applyScan() {
 }
 
 async function poll() {
-  if (state.modal) return;
+  if (state.view === "login" || state.modal) return;
   const active = document.activeElement;
   const typing = active && viewEl().contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName);
   if (typing) return;
@@ -916,8 +921,8 @@ async function poll() {
         render();
       }
     }
-  } catch (_err) {
-    /* le prochain passage réessaie */
+  } catch (error) {
+    if (error.status === 401) renderLogin();
   }
 }
 
@@ -961,7 +966,7 @@ document.body.addEventListener("click", async (event) => {
   }
   if (action === "run-action") {
     try {
-      const result = await api(`/api/devices/${el.dataset.id}/actions/${el.dataset.command}/run`, { method: "POST", body: {} });
+      const result = await finishCommand(await api(`/api/devices/${el.dataset.id}/actions/${el.dataset.command}/run`, { method: "POST", body: {} }));
       toast(result.detail || "Commande envoyée.");
     } catch (error) {
       toast(error.message);
@@ -969,6 +974,10 @@ document.body.addEventListener("click", async (event) => {
     return;
   }
   if (action === "show-stream") {
+    if (location.hostname.endsWith(".vercel.app")) {
+      toast("L'image se regarde sur le Wi-Fi de la maison, depuis l'ordinateur où maMaison est ouvert.");
+      return;
+    }
     state.viewer = {
       deviceId: el.dataset.id,
       actionId: el.dataset.command,
@@ -1217,14 +1226,72 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+let polling = false;
+
+function paintPlace() {
+  const foot = document.querySelector(".aside-foot");
+  if (foot && location.hostname.endsWith(".vercel.app")) {
+    foot.textContent = "Ouverte depuis internet. L'ordinateur de la maison doit rester allumé.";
+  }
+}
+
+function renderLogin() {
+  state.view = "login";
+  paintPlace();
+  const title = document.getElementById("view-title");
+  if (title) title.textContent = "Accès";
+  viewEl().innerHTML = `
+    <article class="card login-card">
+      <h2>Entrer dans la maison</h2>
+      <form id="login-form">
+        <label>Mot de passe
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <p class="form-error" id="login-error"></p>
+        <button class="btn primary" type="submit">Entrer</button>
+      </form>
+    </article>`;
+  document.getElementById("login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const password = new FormData(event.target).get("password");
+    try {
+      await api("/api/login", { method: "POST", body: { password } });
+      state.view = "dashboard";
+      await boot();
+    } catch (error) {
+      const box = document.getElementById("login-error");
+      if (box) box.textContent = error.message;
+    }
+  });
+}
+
+async function finishCommand(result) {
+  if (!result || !result.queued || !result.id) return result || {};
+  for (let step = 0; step < 20; step += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const job = await api(`/api/jobs/${result.id}`);
+    if (job.done) return job.result || { detail: "Commande envoyée." };
+  }
+  return { detail: "La maison n'a pas répondu. L'ordinateur est-il allumé, avec la fenêtre noire ouverte ?" };
+}
+
 async function boot() {
   try {
     await hydrate();
     state.scan = await api("/api/scan");
     state.scanning = state.scan.state === "running";
+    if (state.view === "login") state.view = "dashboard";
+    paintPlace();
     render();
-    setInterval(poll, 4000);
+    if (!polling) {
+      polling = true;
+      setInterval(poll, 4000);
+    }
   } catch (error) {
+    if (error.status === 401) {
+      renderLogin();
+      return;
+    }
     viewEl().innerHTML = `<p class="empty">${esc(error.message)} Rechargez la page. Si la fenêtre noire est fermée, relancez lancer.bat.</p>`;
   }
 }

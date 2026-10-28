@@ -370,6 +370,32 @@ textarea { resize: vertical; }
   margin: 0;
 }
 
+.house-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+
+.login-card {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-card h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 600;
+}
+
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .name-btn {
   background: none;
   border: 0;

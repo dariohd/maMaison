@@ -6,12 +6,13 @@ ROOT = Path(tempfile.mkdtemp())
 os.environ["MAISON_DB"] = str(ROOT / "maison.db")
 os.environ["MAISON_MONITOR"] = "0"
 os.environ["MAISON_OPEN_BROWSER"] = "0"
+os.environ["MAISON_DISTANT"] = "0"
 
 import ipaddress
 
 from fastapi.testclient import TestClient
 
-from app import db, probe, scanner
+from app import db, distant, probe, scanner
 from app.main import app
 
 IPCONFIG = """
@@ -263,6 +264,16 @@ def test_commands_are_generic():
             assert refused.status_code == 400
         finally:
             client.delete(f"/api/devices/{device_id}")
+
+
+def test_distant_allows_only_house_commands():
+    assert distant.allowed("POST", "/api/check")
+    assert distant.allowed("POST", "/api/devices/4/actions/9/run")
+    assert not distant.allowed("POST", "/api/devices/4")
+    assert not distant.allowed("GET", "/api/check")
+    assert not distant.allowed("POST", "/api/devices/4/actions/9/run/../settings")
+    blocked = distant.execute({"method": "DELETE", "path": "/api/devices/1"})
+    assert blocked["ok"] is False
 
 
 def test_ping_localhost():

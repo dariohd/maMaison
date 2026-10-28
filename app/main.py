@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app import commands, db, monitor, probe, scanner
+from app import commands, db, distant, monitor, probe, scanner
 
 log = logging.getLogger("maison")
 ROOT = db.ROOT
@@ -102,9 +102,11 @@ async def lifespan(_app: FastAPI):
     db.init_db()
     if os.environ.get("MAISON_MONITOR", "1") != "0":
         monitor.start()
+    distant.start()
     if os.environ.get("MAISON_OPEN_BROWSER") == "1":
         threading.Timer(0.7, lambda: webbrowser.open("http://127.0.0.1:8787")).start()
     yield
+    distant.stop()
     monitor.stop()
 
 
