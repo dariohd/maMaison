@@ -403,7 +403,12 @@ textarea { resize: vertical; }
   text-decoration: none;
 }
 
-.house-note a, .aside-foot a { color: inherit; }
+.house-code {
+  font-family: var(--mono);
+  font-size: 32px;
+  letter-spacing: 0.08em;
+  margin: 8px 0;
+}
 
 .name-btn {
   background: none;

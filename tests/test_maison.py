@@ -286,6 +286,26 @@ def test_distant_refuses_another_site():
     assert distant.public_url("https://mamaison-dariohprojects.vercel.app") == "https://mamaison-dariohprojects.vercel.app"
 
 
+def test_each_house_has_its_own_link():
+    try:
+        distant.create_house("court")
+    except ValueError as exc:
+        assert "6" in str(exc)
+    else:
+        raise AssertionError("mot de passe trop court")
+    assert distant.parse_config({
+        "url": "https://mamaison-dariohprojects.vercel.app",
+        "token": "secret",
+    }) is None
+    parsed = distant.parse_config({
+        "url": "https://mamaison-dariohprojects.vercel.app",
+        "token": "secret",
+        "house": "ab12-cd34",
+    })
+    assert parsed["house"] == "AB12CD34"
+    assert distant.format_house("AB12CD34") == "AB12-CD34"
+
+
 def test_ping_localhost():
     ok, latency = probe.ping("127.0.0.1", 400)
     assert ok is True

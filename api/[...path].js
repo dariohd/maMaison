@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { readCookie, valid } from "../lib/session.js";
-import { load, save } from "../lib/store.js";
+import { formatHouse, load, save } from "../lib/store.js";
 
 const BLANK = {
   at: null,
@@ -40,8 +40,7 @@ function house(state) {
   return Boolean(state.seenAt && Date.now() - state.seenAt < 25000);
 }
 
-async function enqueue(res, method, path) {
-  const state = await load();
+async function enqueue(res, state, method, path) {
   const pending = state.queue.filter((job) => job.status !== "done");
   if (pending.length >= 20) {
     send(res, 429, { detail: "Trop de commandes en attente." });
@@ -60,17 +59,22 @@ async function enqueue(res, method, path) {
 }
 
 export default async function handler(req, res) {
-  if (!valid(readCookie(req))) {
+  const houseId = valid(readCookie(req));
+  if (!houseId) {
+    send(res, 401, { detail: "Connexion requise" });
+    return;
+  }
+  const state = await load(houseId);
+  if (!state) {
     send(res, 401, { detail: "Connexion requise" });
     return;
   }
   const parts = partsOf(req);
   const method = req.method || "GET";
-  const state = await load();
   const snap = state.snapshot || BLANK;
 
   if (method === "GET" && parts.length === 1 && parts[0] === "dashboard") {
-    send(res, 200, { ...(snap.dashboard || BLANK.dashboard), house: { online: house(state), at: snap.at || null } });
+    send(res, 200, { ...(snap.dashboard || BLANK.dashboard), house: { online: house(state), at: snap.at || null, code: formatHouse(state.id) } });
     return;
   }
   if (method === "GET" && parts.length === 1 && parts[0] === "devices") {
@@ -124,7 +128,7 @@ export default async function handler(req, res) {
     return;
   }
   if (method === "POST" && parts.length === 1 && parts[0] === "check") {
-    await enqueue(res, "POST", "/api/check");
+    await enqueue(res, state, "POST", "/api/check");
     return;
   }
   if (
@@ -135,7 +139,7 @@ export default async function handler(req, res) {
     && /^\d+$/.test(parts[1] || "")
     && /^\d+$/.test(parts[3] || "")
   ) {
-    await enqueue(res, "POST", `/api/devices/${parts[1]}/actions/${parts[3]}/run`);
+    await enqueue(res, state, "POST", `/api/devices/${parts[1]}/actions/${parts[3]}/run`);
     return;
   }
   if (method !== "GET") {

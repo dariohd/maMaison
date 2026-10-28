@@ -310,17 +310,20 @@ def settings():
 @app.get("/api/link")
 def link_state():
     cfg = distant.load_config()
-    return {"linked": cfg is not None, "url": distant.PUBLIC_URL}
+    return {
+        "linked": cfg is not None,
+        "url": distant.PUBLIC_URL,
+        "house": distant.format_house(cfg["house"]) if cfg else "",
+    }
 
 
 @app.post("/api/link")
 def link_house(body: LinkBody):
     try:
-        url = distant.link_with_password(body.password)
+        created = distant.create_house(body.password)
     except ValueError as exc:
-        status = 401 if "incorrect" in str(exc) else 400
-        raise HTTPException(status_code=status, detail=str(exc)) from exc
-    return {"ok": True, "url": url}
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "url": created["url"], "house": created["code"]}
 
 
 @app.put("/api/settings")

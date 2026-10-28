@@ -206,7 +206,7 @@ function renderDashboard() {
     ? ""
     : house.online
       ? `<p class="house-note">L'ordinateur de la maison répond. Les boutons partent depuis ce téléphone.</p>`
-      : `<p class="house-note">L'ordinateur de la maison ne répond pas. Ouvre maMaison sur cet ordinateur et laisse la fenêtre ouverte. <a href="${RELEASE}">Télécharger le programme</a> s'il n'est pas encore là.</p>`;
+      : `<p class="house-note">L'ordinateur de cette maison ne répond pas. Ouvre maMaison sur son Wi-Fi et laisse la fenêtre ouverte. <a href="${RELEASE}">Télécharger le programme</a> s'il n'est pas encore là.</p>`;
   const attention = data.attention || [];
   const devices = data.devices || [];
   const bars = (data.by_type || []).map((item) => {
@@ -1248,9 +1248,15 @@ let polling = false;
 
 function paintPlace() {
   const foot = document.querySelector(".aside-foot");
-  if (foot && location.hostname.endsWith(".vercel.app")) {
-    foot.innerHTML = `Ouvre maMaison sur l'ordinateur de la maison. <a href="${RELEASE}">Télécharger</a>`;
+  if (!foot) return;
+  if (location.hostname.endsWith(".vercel.app")) {
+    const code = state.dashboard?.house?.code || state.houseCode || "";
+    foot.innerHTML = code
+      ? `Maison ${esc(code)}. <a href="${RELEASE}">Télécharger le programme</a>`
+      : `Le code vient de l'ordinateur de la maison. <a href="${RELEASE}">Télécharger</a>`;
+    return;
   }
+  if (state.houseCode) foot.textContent = `Code de la maison : ${state.houseCode}`;
 }
 
 function onHouseComputer() {
@@ -1269,42 +1275,75 @@ function renderInstall() {
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Installer le programme</h2>
-      <p>Cette page est la télécommande. Elle ne voit pas les appareils tant que maMaison n'est pas ouvert sur un ordinateur de la maison.</p>
-      <p>Télécharge le programme, ouvre-le, entre le même mot de passe que sur cette page, puis laisse la fenêtre ouverte.</p>
+      <p>Chaque maison se crée sur place. Installe maMaison sur un ordinateur qui est sur le Wi-Fi de cette maison, choisis un mot de passe, et laisse la fenêtre ouverte.</p>
+      <p>Le programme affiche un code. Sur le téléphone, entre ce code et le mot de passe choisi là-bas.</p>
       <a class="btn primary" href="${RELEASE}">Télécharger maMaison pour Windows</a>
       <p class="help">Dès que l'ordinateur est relié, le tableau de bord s'affiche ici.</p>
     </article>`;
 }
 
-function renderLink() {
+function renderCreate() {
   state.view = "link";
   const title = document.getElementById("view-title");
-  if (title) title.textContent = "Relier la maison";
+  if (title) title.textContent = "Nouvelle maison";
   viewEl().innerHTML = `
     <article class="card login-card">
-      <h2>Relier cet ordinateur</h2>
-      <p>Entre le mot de passe de la page maMaison. C'est le même que sur le téléphone. Ensuite, laisse cette fenêtre ouverte.</p>
+      <h2>Créer cette maison</h2>
+      <p>Cet ordinateur est sur le Wi-Fi. Choisis le mot de passe que la famille tapera sur le téléphone. Il n'appartient qu'à cette maison.</p>
       <form id="link-form">
-        <label>Mot de passe de la page
-          <input type="password" name="password" autocomplete="current-password" required>
+        <label>Mot de passe
+          <input type="password" name="password" autocomplete="new-password" required minlength="6">
+        </label>
+        <label>Encore le mot de passe
+          <input type="password" name="confirm" autocomplete="new-password" required minlength="6">
         </label>
         <p class="form-error" id="link-error"></p>
-        <button class="btn primary" type="submit">Relier</button>
+        <button class="btn primary" type="submit">Créer la maison</button>
       </form>
     </article>`;
   document.getElementById("link-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const password = new FormData(event.target).get("password");
+    const form = new FormData(event.target);
+    const password = String(form.get("password") || "");
+    const confirm = String(form.get("confirm") || "");
+    const box = document.getElementById("link-error");
+    if (password.length < 6) {
+      if (box) box.textContent = "Le mot de passe doit contenir au moins 6 caractères.";
+      return;
+    }
+    if (password !== confirm) {
+      if (box) box.textContent = "Les deux mots de passe sont différents.";
+      return;
+    }
     try {
       const linked = await api("/api/link", { method: "POST", body: { password } });
-      if (linked.url) window.open(linked.url, "_blank");
-      state.view = "dashboard";
-      await boot();
+      renderReady(linked.house || "");
     } catch (error) {
-      const box = document.getElementById("link-error");
       if (box) box.textContent = error.message;
     }
   });
+}
+
+function renderReady(code) {
+  state.view = "link";
+  state.houseCode = code;
+  const title = document.getElementById("view-title");
+  if (title) title.textContent = "Maison créée";
+  viewEl().innerHTML = `
+    <article class="card login-card">
+      <h2>Cette maison a son code</h2>
+      <p>Sur le téléphone, ouvre la page. Entre ce code et le mot de passe que tu viens de choisir. Laisse cette fenêtre ouverte.</p>
+      <p class="house-code">${esc(code)}</p>
+      <button type="button" class="btn primary" id="open-console">Ouvrir la console</button>
+    </article>`;
+  document.getElementById("open-console").addEventListener("click", async () => {
+    state.view = "dashboard";
+    await boot();
+  });
+}
+
+function renderLink() {
+  renderCreate();
 }
 
 function renderLogin() {
@@ -1315,7 +1354,11 @@ function renderLogin() {
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Entrer dans la maison</h2>
+      <p>Le code est affiché par le programme ouvert sur l'ordinateur de cette maison. Le mot de passe est celui choisi à ce moment-là.</p>
       <form id="login-form">
+        <label>Code de la maison
+          <input name="house" autocapitalize="characters" autocomplete="off" required>
+        </label>
         <label>Mot de passe
           <input type="password" name="password" autocomplete="current-password" required>
         </label>
@@ -1325,9 +1368,9 @@ function renderLogin() {
     </article>`;
   document.getElementById("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const password = new FormData(event.target).get("password");
+    const form = new FormData(event.target);
     try {
-      await api("/api/login", { method: "POST", body: { password } });
+      await api("/api/login", { method: "POST", body: { house: form.get("house"), password: form.get("password") } });
       state.view = "dashboard";
       await boot();
     } catch (error) {
@@ -1351,8 +1394,9 @@ async function boot() {
   try {
     if (onHouseComputer()) {
       const link = await api("/api/link");
+      state.houseCode = link.house || state.houseCode || "";
       if (!link.linked) {
-        renderLink();
+        renderCreate();
         return;
       }
     }

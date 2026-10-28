@@ -33,11 +33,22 @@ def load_config() -> dict | None:
     except (OSError, json.JSONDecodeError):
         log.exception("lecture du lien distant")
         return None
+    return parse_config(data)
+
+
+def parse_config(data: dict) -> dict | None:
     url = str(data.get("url") or "").rstrip("/")
     token = str(data.get("token") or "")
-    if not url.startswith("https://") or not token:
+    house = re.sub(r"[^A-Za-z0-9]", "", str(data.get("house") or "")).upper()
+    if not url.startswith("https://") or not token or len(house) != 8:
         return None
-    return {"url": url, "token": token}
+    return {"url": url, "token": token, "house": house}
+
+
+def format_house(house: str) -> str:
+    if len(house) == 8:
+        return f"{house[:4]}-{house[4:]}"
+    return house
 
 
 def public_url(url: str | None = None) -> str:
@@ -50,20 +61,22 @@ def public_url(url: str | None = None) -> str:
     return f"https://{parsed.hostname}"
 
 
-def save_link(url: str, token: str) -> None:
+def save_link(url: str, house: str, token: str) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"url": url, "token": token}, indent=2),
+        json.dumps({"url": url, "house": house, "token": token}, indent=2),
         encoding="utf-8",
     )
     wake()
 
 
-def link_with_password(password: str, url: str | None = None) -> str:
+def create_house(password: str, url: str | None = None) -> dict:
+    if len(password) < 6:
+        raise ValueError("Le mot de passe doit contenir au moins 6 caractères.")
     target = public_url(url)
     req = urllib.request.Request(
-        target + "/api/pair",
+        target + "/api/houses",
         data=json.dumps({"password": password}).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -75,16 +88,21 @@ def link_with_password(password: str, url: str | None = None) -> str:
         with urllib.request.urlopen(req, timeout=20) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise ValueError("Mot de passe incorrect.") from exc
-        raise ValueError("La page publique n'a pas répondu.") from exc
+        detail = ""
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = str(payload.get("detail") or "")
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            detail = ""
+        raise ValueError(detail or "La page publique n'a pas répondu.") from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
         raise ValueError("La page publique n'a pas répondu.") from exc
+    house = re.sub(r"[^A-Za-z0-9]", "", str(data.get("id") or "")).upper()
     token = str(data.get("token") or "")
-    if not token:
-        raise ValueError("La page publique n'a pas donné de lien.")
-    save_link(target, token)
-    return target
+    if len(house) != 8 or not token:
+        raise ValueError("La page publique n'a pas créé la maison.")
+    save_link(target, house, token)
+    return {"url": target, "house": house, "code": format_house(house)}
 
 
 def allowed(method: str, path: str) -> bool:
@@ -166,6 +184,7 @@ def _post(cfg: dict, payload: dict) -> dict:
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": "Bearer " + cfg["token"],
+            "X-House": cfg["house"],
             "Content-Type": "application/json",
             "User-Agent": "maMaison/1.0",
         },

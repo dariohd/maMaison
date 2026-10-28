@@ -1,5 +1,5 @@
-import crypto from "node:crypto";
-import { load, save } from "../lib/store.js";
+import { checkToken } from "../lib/secrets.js";
+import { load, normalizeHouse, save } from "../lib/store.js";
 
 function send(res, code, body) {
   res.statusCode = code;
@@ -8,25 +8,7 @@ function send(res, code, body) {
   res.end(JSON.stringify(body));
 }
 
-function authorized(req) {
-  const token = process.env.AGENT_TOKEN || "";
-  if (!token) return false;
-  const header = String(req.headers.authorization || "");
-  const expected = Buffer.from(`Bearer ${token}`);
-  const given = Buffer.from(header);
-  if (expected.length !== given.length) return false;
-  return crypto.timingSafeEqual(given, expected);
-}
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    send(res, 405, { detail: "Méthode refusée" });
-    return;
-  }
-  if (!authorized(req)) {
-    send(res, 401, { detail: "Jeton refusé" });
-    return;
-  }
+function readBody(req) {
   let body = req.body || {};
   if (typeof body === "string") {
     try {
@@ -35,7 +17,23 @@ export default async function handler(req, res) {
       body = {};
     }
   }
-  const state = await load();
+  return body;
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    send(res, 405, { detail: "Méthode refusée" });
+    return;
+  }
+  const body = readBody(req);
+  const header = String(req.headers.authorization || "");
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  const house = normalizeHouse(req.headers["x-house"] || body.house);
+  const state = house ? await load(house) : null;
+  if (!state || !checkToken(token, state.agentTokenHash)) {
+    send(res, 401, { detail: "Jeton refusé" });
+    return;
+  }
   const now = Date.now();
   const results = new Map((body.results || []).map((item) => [item.id, item.result]));
   for (const job of state.queue) {
