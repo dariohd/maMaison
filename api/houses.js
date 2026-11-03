@@ -30,8 +30,8 @@ export default async function handler(req, res) {
     return;
   }
   const password = String(readBody(req).password || "");
-  if (password.length < 6) {
-    send(res, 400, { detail: "Le mot de passe doit contenir au moins 6 caractères." });
+  if (password.length < 8) {
+    send(res, 400, { detail: "Le mot de passe doit contenir au moins 8 caractères." });
     return;
   }
   let id = newHouseId();

@@ -321,6 +321,18 @@ def link_state():
     }
 
 
+@app.get("/api/link/entry")
+def link_entry():
+    cfg = distant.load_config()
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Cette maison n'est pas encore créée.")
+    return {
+        "house": distant.format_house(cfg["house"]),
+        "url": distant.entry_url(cfg["house"]),
+        "qr": distant.entry_svg(cfg["house"]),
+    }
+
+
 @app.post("/api/link")
 def link_house(body: LinkBody):
     try:
@@ -567,6 +579,15 @@ def apply_preset(device_id: int, body: PresetBody):
     for item in preset:
         db.insert_action(device_id, commands.clean_action(item))
     return db.list_actions(device_id, secrets=True)
+
+
+@app.post("/api/devices/{device_id}/actions/try")
+def try_action(device_id: int, body: ActionBody):
+    device = _device_or_404(device_id)
+    action = _clean_action(body)
+    if action["kind"] != "http":
+        raise HTTPException(status_code=400, detail="Un flux se regarde. Il ne s'essaie pas comme un appel.")
+    return commands.run_http(device, action)
 
 
 @app.post("/api/devices/{device_id}/actions/{action_id}/run")

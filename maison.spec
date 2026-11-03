@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hidden = []
-for name in ("uvicorn", "fastapi", "starlette", "anyio"):
+for name in ("uvicorn", "fastapi", "starlette", "anyio", "segno", "webview"):
     hidden += collect_submodules(name)
 
 a = Analysis(

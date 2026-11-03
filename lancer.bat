@@ -20,7 +20,7 @@ if errorlevel 1 (
 )
 set PYTHONUTF8=1
 set MAISON_OPEN_BROWSER=1
-echo Laissez cette fenetre ouverte pendant l'utilisation.
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
-echo La console s'est arretee.
+echo La fenetre du programme est l'ecran de la maison. Laisse-la ouverte.
+python lancer.py
+echo Le programme s'est arrete.
 pause

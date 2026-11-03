@@ -87,10 +87,10 @@ def test_api_flow():
     with TestClient(app) as client:
         page = client.get("/")
         assert page.status_code == 200
-        assert "Tableau de bord" in page.text
+        assert "Maison" in page.text
         script = client.get("/assets/app.js")
         assert script.status_code == 200
-        assert "Enregistrer et tester" in script.text
+        assert "Étape 1 sur 3" in script.text
 
         board = client.get("/api/dashboard")
         assert board.status_code == 200
@@ -255,6 +255,27 @@ def test_commands_are_generic():
             public = client.get("/api/devices").json()
             listed = next(item for item in public if item["id"] == device_id)
             assert "auth_pass" not in listed["actions"][0]
+            original = commands.run_http
+
+            def fake_run(_device, action):
+                assert action["path"] == "/status"
+                assert action["method"] == "GET"
+                return {"ok": True, "detail": "HTTP 200"}
+
+            commands.run_http = fake_run
+            try:
+                tried = client.post(f"/api/devices/{device_id}/actions/try", json={
+                    "label": "Lire",
+                    "kind": "http",
+                    "method": "GET",
+                    "path": "/status",
+                })
+                assert tried.status_code == 200, tried.text
+                assert tried.json()["detail"] == "HTTP 200"
+                stored = client.get(f"/api/devices/{device_id}/actions").json()
+                assert all(item["path"] != "/status" for item in stored)
+            finally:
+                commands.run_http = original
             refused = client.post(f"/api/devices/{device_id}/actions", json={
                 "label": "Dehors",
                 "kind": "http",
@@ -290,7 +311,7 @@ def test_each_house_has_its_own_link():
     try:
         distant.create_house("court")
     except ValueError as exc:
-        assert "6" in str(exc)
+        assert "8" in str(exc)
     else:
         raise AssertionError("mot de passe trop court")
     assert distant.parse_config({
@@ -304,6 +325,11 @@ def test_each_house_has_its_own_link():
     })
     assert parsed["house"] == "AB12CD34"
     assert distant.format_house("AB12CD34") == "AB12-CD34"
+    assert distant.entry_url("ab12cd34") == "https://mamaisonconnectee.vercel.app/?maison=AB12-CD34"
+    square = distant.entry_svg("AB12CD34")
+    assert "<svg" in square.lower()
+    assert "otpauth" not in square.lower()
+    assert "token" not in square.lower()
 
 
 def test_ping_localhost():

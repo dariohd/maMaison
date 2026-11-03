@@ -51,6 +51,27 @@ def format_house(house: str) -> str:
     return house
 
 
+def _house_id(house: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9]", "", house).upper()
+    if len(clean) != 8:
+        raise ValueError("Code de maison invalide.")
+    return clean
+
+
+def entry_url(house: str) -> str:
+    return f"{PUBLIC_URL}/?maison={format_house(_house_id(house))}"
+
+
+def entry_svg(house: str) -> str:
+    import io
+
+    import segno
+
+    buffer = io.BytesIO()
+    segno.make(entry_url(house), error="m").save(buffer, kind="svg", scale=4, xmldecl=False)
+    return buffer.getvalue().decode("utf-8")
+
+
 def public_url(url: str | None = None) -> str:
     target = (url or PUBLIC_URL).strip()
     parsed = urllib.parse.urlparse(target)
@@ -72,8 +93,8 @@ def save_link(url: str, house: str, token: str) -> None:
 
 
 def create_house(password: str, url: str | None = None) -> dict:
-    if len(password) < 6:
-        raise ValueError("Le mot de passe doit contenir au moins 6 caractères.")
+    if len(password) < 8:
+        raise ValueError("Le mot de passe doit contenir au moins 8 caractères.")
     target = public_url(url)
     req = urllib.request.Request(
         target + "/api/houses",
