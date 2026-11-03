@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { readCookie, valid } from "../lib/session.js";
-import { formatHouse, load, save } from "../lib/store.js";
+import { formatHouse, load, loadLive, save } from "../lib/store.js";
 
 const BLANK = {
   at: null,
@@ -36,8 +36,8 @@ function partsOf(req) {
   return raw.replace(/^\/api\/?/, "").split("/").filter(Boolean);
 }
 
-function house(state) {
-  return Boolean(state.seenAt && Date.now() - state.seenAt < 25000);
+function online(seenAt) {
+  return Boolean(seenAt && Date.now() - seenAt < 25000);
 }
 
 async function enqueue(res, state, method, path) {
@@ -59,22 +59,24 @@ async function enqueue(res, state, method, path) {
 }
 
 export default async function handler(req, res) {
-  const houseId = valid(readCookie(req));
-  if (!houseId) {
+  const session = valid(readCookie(req));
+  if (!session) {
     send(res, 401, { detail: "Connexion requise" });
     return;
   }
-  const state = await load(houseId);
-  if (!state) {
+  const state = await load(session.house);
+  if (!state || (Number(state.sessionEpoch) || 0) !== session.epoch) {
     send(res, 401, { detail: "Connexion requise" });
     return;
   }
   const parts = partsOf(req);
   const method = req.method || "GET";
-  const snap = state.snapshot || BLANK;
+  const live = await loadLive(session.house);
+  const snap = (live && live.snapshot) || state.snapshot || BLANK;
+  const seenAt = (live && live.seenAt) || state.seenAt || 0;
 
   if (method === "GET" && parts.length === 1 && parts[0] === "dashboard") {
-    send(res, 200, { ...(snap.dashboard || BLANK.dashboard), house: { online: house(state), at: snap.at || null, code: formatHouse(state.id) } });
+    send(res, 200, { ...(snap.dashboard || BLANK.dashboard), house: { online: online(seenAt), at: snap.at || null, code: formatHouse(state.id) } });
     return;
   }
   if (method === "GET" && parts.length === 1 && parts[0] === "devices") {

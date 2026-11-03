@@ -1,5 +1,5 @@
 import { checkToken } from "../lib/secrets.js";
-import { load, normalizeHouse, save } from "../lib/store.js";
+import { load, normalizeHouse, save, saveLive } from "../lib/store.js";
 
 function send(res, code, body) {
   res.statusCode = code;
@@ -35,27 +35,35 @@ export default async function handler(req, res) {
     return;
   }
   const now = Date.now();
+  let authChanged = false;
   const results = new Map((body.results || []).map((item) => [item.id, item.result]));
   for (const job of state.queue) {
     if (results.has(job.id)) {
       job.status = "done";
       job.result = results.get(job.id);
       job.doneAt = now;
+      authChanged = true;
     } else if (job.status === "sent" && now - (job.sentAt || 0) > 30000) {
       job.status = "pending";
+      authChanged = true;
     }
   }
+  const before = state.queue.length;
   state.queue = state.queue.filter((job) => job.status !== "done" || now - (job.doneAt || 0) < 120000);
-  if (body.snapshot) {
-    state.snapshot = body.snapshot;
-    state.seenAt = now;
+  if (state.queue.length !== before) authChanged = true;
+  if (body.snapshot) await saveLive(house, body.snapshot);
+  if (state.snapshot) {
+    delete state.snapshot;
+    delete state.seenAt;
+    authChanged = true;
   }
   const commands = state.queue.filter((job) => job.status === "pending").slice(0, 4);
   for (const job of commands) {
     job.status = "sent";
     job.sentAt = now;
+    authChanged = true;
   }
-  await save(state);
+  if (authChanged) await save(state);
   send(res, 200, {
     commands: commands.map((job) => ({ id: job.id, method: job.method, path: job.path })),
   });

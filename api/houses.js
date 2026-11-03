@@ -34,6 +34,10 @@ export default async function handler(req, res) {
     send(res, 400, { detail: "Le mot de passe doit contenir au moins 8 caractères." });
     return;
   }
+  if (password.length > 80) {
+    send(res, 400, { detail: "Le mot de passe est trop long." });
+    return;
+  }
   let id = newHouseId();
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (!(await load(id))) break;
@@ -51,6 +55,7 @@ export default async function handler(req, res) {
     lastTotpStep: 0,
     loginFailures: 0,
     loginLockedUntil: 0,
+    sessionEpoch: 0,
     snapshot: null,
     seenAt: 0,
     queue: [],

@@ -307,6 +307,15 @@ def test_distant_refuses_another_site():
     assert distant.public_url("https://mamaisonconnectee.vercel.app") == "https://mamaisonconnectee.vercel.app"
 
 
+def test_password_stays_with_its_house():
+    try:
+        distant.change_password("actuel", "court")
+    except ValueError as exc:
+        assert "8" in str(exc)
+    else:
+        raise AssertionError("mot de passe trop court")
+
+
 def test_each_house_has_its_own_link():
     try:
         distant.create_house("court")

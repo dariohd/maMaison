@@ -92,9 +92,29 @@ def save_link(url: str, house: str, token: str) -> None:
     wake()
 
 
-def create_house(password: str, url: str | None = None) -> dict:
+def _password_ok(password: str) -> None:
     if len(password) < 8:
         raise ValueError("Le mot de passe doit contenir au moins 8 caractères.")
+    if len(password) > 80:
+        raise ValueError("Le mot de passe est trop long.")
+
+
+def change_password(current: str, new: str) -> None:
+    _password_ok(new)
+    _agent_json("/api/account", {"password": current, "next": new})
+
+
+def reset_password(code: str, new: str) -> None:
+    _password_ok(new)
+    _agent_json("/api/account", {"reset": True, "otp": code, "next": new})
+
+
+def disconnect_phones() -> None:
+    _agent_json("/api/account", {"disconnect": True})
+
+
+def create_house(password: str, url: str | None = None) -> dict:
+    _password_ok(password)
     target = public_url(url)
     req = urllib.request.Request(
         target + "/api/houses",

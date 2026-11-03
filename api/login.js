@@ -69,6 +69,6 @@ export default async function handler(req, res) {
   fresh.lastTotpStep = step;
   fresh.totpReady = true;
   await save(fresh);
-  res.setHeader("Set-Cookie", cookieHeader(issue(state.id)));
+  res.setHeader("Set-Cookie", cookieHeader(issue(fresh.id, fresh.sessionEpoch || 0)));
   send(res, 200, { ok: true, house: formatHouse(state.id) });
 }

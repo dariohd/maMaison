@@ -52,6 +52,7 @@ const state = {
   viewerTimer: null,
   presets: [],
   pickHouse: false,
+  chosenHouse: "",
   pending: new Set(),
 };
 
@@ -486,9 +487,44 @@ function renderSettings() {
   viewEl().innerHTML = `
     <article class="card login-card" id="phone-card">
       <h2>Relier un téléphone</h2>
-      <p>Scanne ce carré avec l'appareil photo. La page s'ouvre. Tape le mot de passe, puis les 6 chiffres.</p>
+      <p>Scanne ce carré avec l'appareil photo. La page s'ouvre. Tape le mot de passe de cette maison, puis les 6 chiffres.</p>
       <div class="qr" id="entry-qr"></div>
       <p class="house-code" id="entry-code"></p>
+      <p class="help">Ce mot de passe ne sert que pour cette maison. Une autre maison a le sien, choisi sur son ordinateur.</p>
+      <form class="stack" data-form="password">
+        <h2>Changer le mot de passe</h2>
+        <label>Mot de passe actuel
+          <input type="password" name="current" autocomplete="current-password" required>
+        </label>
+        <label>Nouveau mot de passe
+          <input type="password" name="next" autocomplete="new-password" required minlength="8">
+        </label>
+        <label>Encore le nouveau
+          <input type="password" name="confirm" autocomplete="new-password" required minlength="8">
+        </label>
+        <button class="btn primary" type="submit">Enregistrer</button>
+      </form>
+      <details>
+        <summary>Si le mot de passe est oublié</summary>
+        <form class="stack" data-form="reset-password">
+          <p class="help">Les 6 chiffres de l'application suffisent, puisque tu es sur l'ordinateur de la maison. Les téléphones se reconnectent ensuite.</p>
+          <label>Les 6 chiffres
+            <input name="otp" inputmode="numeric" autocomplete="one-time-code" required>
+          </label>
+          <label>Nouveau mot de passe
+            <input type="password" name="next" autocomplete="new-password" required minlength="8">
+          </label>
+          <label>Encore le nouveau
+            <input type="password" name="confirm" autocomplete="new-password" required minlength="8">
+          </label>
+          <button class="btn" type="submit">Remplacer le mot de passe</button>
+        </form>
+      </details>
+      <details>
+        <summary>Déconnecter les téléphones</summary>
+        <p class="help">Le mot de passe reste le même. Chaque téléphone retape le mot de passe et les 6 chiffres.</p>
+        <button type="button" class="btn" data-action="disconnect-phones">Déconnecter</button>
+      </details>
       <details>
         <summary>Si l'application des 6 chiffres est perdue</summary>
         <div id="totp-reset" class="stack">
@@ -1041,7 +1077,23 @@ document.body.addEventListener("click", async (event) => {
   if (action === "stop") return;
   if (action === "other-house") {
     state.pickHouse = true;
+    state.chosenHouse = "";
     renderLogin();
+    return;
+  }
+  if (action === "pick-saved-house") {
+    state.pickHouse = false;
+    state.chosenHouse = el.dataset.house || "";
+    renderLogin();
+    return;
+  }
+  if (action === "disconnect-phones") {
+    try {
+      await api("/api/link/phones", { method: "POST", body: {} });
+      toast("Les téléphones sont déconnectés.");
+    } catch (error) {
+      toast(error.message);
+    }
     return;
   }
   if (action === "rotate-totp") {
@@ -1292,6 +1344,26 @@ document.body.addEventListener("submit", async (event) => {
       render();
       return;
     }
+    if (kind === "password" || kind === "reset-password") {
+      const data = Object.fromEntries(new FormData(form).entries());
+      const next = String(data.next || "");
+      if (next.length < 8) {
+        toast("Le mot de passe doit contenir au moins 8 caractères.");
+        return;
+      }
+      if (next !== String(data.confirm || "")) {
+        toast("Les deux mots de passe sont différents.");
+        return;
+      }
+      if (kind === "reset-password") {
+        await api("/api/link/password", { method: "POST", body: { reset: true, otp: data.otp || "", next } });
+      } else {
+        await api("/api/link/password", { method: "POST", body: { password: data.current || "", next } });
+      }
+      form.reset();
+      toast("Le mot de passe est enregistré. Les téléphones se reconnectent.");
+      return;
+    }
     if (kind === "settings") {
       const data = Object.fromEntries(new FormData(form).entries());
       state.settings = await api("/api/settings", {
@@ -1437,7 +1509,7 @@ function renderCreate() {
     <article class="card login-card">
       <p class="steps">Étape 1 sur 3</p>
       <h2>Le mot de passe</h2>
-      <p>Choisis celui que la famille tapera sur le téléphone. Un mot qu'elle retient, et que personne d'autre ne connaît. Au moins 8 caractères.</p>
+      <p>Choisis celui que la famille tapera sur le téléphone. Au moins 8 caractères. Il est enregistré pour cette maison seulement, sous une forme qui ne se relit pas. Une autre maison se crée sur son ordinateur, avec son propre mot de passe.</p>
       <form id="link-form">
         <label>Mot de passe
           <input type="password" name="password" autocomplete="new-password" required minlength="8">
@@ -1554,11 +1626,31 @@ function renderReady(linked) {
   });
 }
 
-function houseFromQuery() {
-  const raw = new URLSearchParams(location.search).get("maison") || "";
-  const clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+function formatHouseCode(raw) {
+  const clean = String(raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (clean.length !== 8) return "";
   return `${clean.slice(0, 4)}-${clean.slice(4)}`;
+}
+
+function houseFromQuery() {
+  return formatHouseCode(new URLSearchParams(location.search).get("maison") || "");
+}
+
+function savedHouses() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("maison-maisons") || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.map(formatHouseCode).filter(Boolean).filter((code, index, all) => all.indexOf(code) === index).slice(0, 12);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function rememberHouse(code) {
+  const clean = formatHouseCode(code);
+  if (!clean) return;
+  const list = [clean, ...savedHouses().filter((item) => item !== clean)].slice(0, 12);
+  localStorage.setItem("maison-maisons", JSON.stringify(list));
 }
 
 async function loadEntryCard() {
@@ -1607,22 +1699,24 @@ function renderLogin() {
   paintPlace();
   const title = document.getElementById("view-title");
   if (title) title.textContent = "Entrée";
-  const known = houseFromQuery();
-  const askCode = !known || state.pickHouse;
+  const fromLink = houseFromQuery();
+  const selected = state.pickHouse ? "" : (state.chosenHouse || fromLink);
+  const askCode = !selected;
+  const others = savedHouses().filter((item) => item !== selected);
   viewEl().innerHTML = `
     <article class="card login-card">
       <h2>Entrer</h2>
-      <p>${askCode ? "Le code est affiché sur l'ordinateur de la maison." : "Maison reconnue."} Tape le mot de passe choisi là-bas, puis les 6 chiffres du téléphone.</p>
+      <p>${askCode ? "Le code est affiché sur l'ordinateur de la maison." : "Maison reconnue."} Tape le mot de passe choisi sur cet ordinateur, puis les 6 chiffres.</p>
       <form id="login-form">
         ${askCode ? `
           <label>Code de la maison
-            <input name="house" value="${esc(known)}" autocapitalize="characters" autocomplete="off" required>
+            <input name="house" value="${esc(fromLink)}" autocapitalize="characters" autocomplete="off" required>
           </label>
         ` : `
-          <p class="house-code">${esc(known)}</p>
-          <input type="hidden" name="house" value="${esc(known)}">
+          <p class="house-code">${esc(selected)}</p>
+          <input type="hidden" name="house" value="${esc(selected)}">
         `}
-        <label>Mot de passe
+        <label>Mot de passe de cette maison
           <input type="password" name="password" autocomplete="current-password" required>
         </label>
         <label>6 chiffres
@@ -1631,14 +1725,18 @@ function renderLogin() {
         <p class="form-error" id="login-error"></p>
         <button class="btn primary" type="submit">Entrer</button>
       </form>
+      ${others.length ? `<div class="chips">${others.map((item) => `<button type="button" class="chip" data-action="pick-saved-house" data-house="${esc(item)}">${esc(item)}</button>`).join("")}</div>` : ""}
       ${askCode ? "" : `<button type="button" class="btn" data-action="other-house">Autre maison</button>`}
-      <p class="help">Cinq erreurs ferment l'entrée pendant 15 minutes.</p>
+      <p class="help">Chaque maison a son mot de passe. Il n'est pas enregistré dans le téléphone. Cinq erreurs ferment l'entrée pendant 15 minutes.</p>
     </article>`;
   document.getElementById("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
     try {
       await api("/api/login", { method: "POST", body: { house: form.get("house"), password: form.get("password"), otp: form.get("otp") } });
+      rememberHouse(form.get("house"));
+      state.pickHouse = false;
+      state.chosenHouse = formatHouseCode(form.get("house"));
       state.view = "dashboard";
       await boot();
     } catch (error) {

@@ -105,6 +105,13 @@ class TotpBody(BaseModel):
     code: str = ""
 
 
+class PasswordBody(BaseModel):
+    password: str = ""
+    next: str = ""
+    otp: str = ""
+    reset: bool = False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init_db()
@@ -352,6 +359,27 @@ def link_house(body: LinkBody):
 def link_confirm(body: TotpBody):
     try:
         distant.confirm_totp(body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/link/password")
+def link_password(body: PasswordBody):
+    try:
+        if body.reset:
+            distant.reset_password(body.otp, body.next)
+        else:
+            distant.change_password(body.password, body.next)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/link/phones")
+def link_phones():
+    try:
+        distant.disconnect_phones()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}

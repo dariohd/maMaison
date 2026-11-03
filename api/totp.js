@@ -47,6 +47,7 @@ export default async function handler(req, res) {
     const secret = generateSecret();
     state.totpSecret = secret;
     state.lastTotpStep = 0;
+    state.sessionEpoch = (Number(state.sessionEpoch) || 0) + 1;
     await save(state);
     const code = formatHouse(state.id);
     send(res, 200, { secret, qr: await qrFor(secret, code), house: code });

@@ -1,18 +1,20 @@
 :root {
   color-scheme: light;
-  --bg: #eef1f4;
+  --bg: #eef2f6;
   --rail: #ffffff;
   --paper: #ffffff;
-  --ink: #1b2128;
-  --muted: #5d6772;
-  --faint: #8b949e;
-  --line: #e3e7ec;
+  --ink: #1b2430;
+  --muted: #5c6b7c;
+  --faint: #8b97a6;
+  --line: #e1e8f0;
   --online: #1f7a4d;
   --offline: #b42318;
   --partial: #b54708;
   --unknown: #667085;
-  --fill: #1f6b45;
-  --fill-ink: #f4fbf7;
+  --fill: #1d4f86;
+  --fill-ink: #f4f8fc;
+  --fill-soft: #e6eef7;
+  --fill-deep: #163e68;
   --danger: #b42318;
   --sans: "Segoe UI Variable Text", "Segoe UI", sans-serif;
   --serif: var(--sans);
@@ -91,7 +93,7 @@ aside {
   font-weight: 560;
 }
 
-.nav.is-active { background: #e7f3ec; color: #145233; }
+.nav.is-active { background: var(--fill-soft); color: var(--fill-deep); }
 
 .aside-foot {
   margin-top: auto;
