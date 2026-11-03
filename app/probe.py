@@ -65,12 +65,23 @@ def tcp_open(ip: str, port: int, timeout: float) -> bool:
         sock.close()
 
 
+def _direct(https: bool):
+    class _Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    handlers = [_Stay(), urllib.request.ProxyHandler({})]
+    if https:
+        handlers.insert(0, urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    return urllib.request.build_opener(*handlers)
+
+
 def http_probe(ip: str, port: int, path: str, https: bool, timeout: float) -> tuple[bool, str]:
     scheme = "https" if https else "http"
     if not path.startswith("/"):
         path = "/" + path
     url = f"{scheme}://{ip}:{port}{path}"
-    context = ssl._create_unverified_context() if https else None
+    opener = _direct(https)
     for method in ("HEAD", "GET"):
         request = urllib.request.Request(
             url,
@@ -78,11 +89,11 @@ def http_probe(ip: str, port: int, path: str, https: bool, timeout: float) -> tu
             headers={"User-Agent": "maMaisonConnectee/1.0", "Connection": "close"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            with opener.open(request, timeout=timeout) as response:
                 response.read(64)
                 return True, f"HTTP {response.status}"
         except urllib.error.HTTPError as exc:
-            if exc.code == 405 and method == "HEAD":
+            if method == "HEAD" and exc.code in {405, 501}:
                 continue
             if exc.code < 500:
                 return True, f"HTTP {exc.code}"

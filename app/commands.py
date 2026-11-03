@@ -190,14 +190,17 @@ def run_http(device: dict, action: dict) -> dict:
     timeout = probe.timeouts()["http_timeout_s"]
     try:
         with _request(device, action, timeout) as response:
+            if 300 <= response.status < 400:
+                return {"ok": False, "detail": "L'appareil a renvoyé ailleurs."}
             excerpt = response.read(800).decode("utf-8", errors="replace").strip()
             detail = f"HTTP {response.status}"
             if excerpt:
                 detail = f"{detail}. {excerpt[:180]}"
-            return {"ok": response.status < 400, "detail": detail}
+            return {"ok": 200 <= response.status < 300, "detail": detail}
     except urllib.error.HTTPError as exc:
-        ok = exc.code < 400
-        return {"ok": ok, "detail": f"HTTP {exc.code}"}
+        if 300 <= exc.code < 400:
+            return {"ok": False, "detail": "L'appareil a renvoyé ailleurs."}
+        return {"ok": 200 <= exc.code < 300, "detail": f"HTTP {exc.code}"}
     except (TimeoutError, urllib.error.URLError):
         return {"ok": False, "detail": "Appareil injoignable"}
     except Exception:

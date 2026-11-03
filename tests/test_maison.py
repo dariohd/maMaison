@@ -341,6 +341,40 @@ def test_each_house_has_its_own_link():
     assert "token" not in square.lower()
 
 
+def test_a_redirect_is_not_a_success():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from app import commands, db
+
+    db.init_db()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1/ailleurs")
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        result = commands.run_http(
+            {"ip": "127.0.0.1", "protocol": "http", "port": port},
+            {"kind": "http", "method": "GET", "path": "/open", "body": "", "auth_user": "", "auth_pass": ""},
+        )
+        checked = probe.http_probe("127.0.0.1", port, "/", False, 2)
+    finally:
+        server.shutdown()
+    assert result["ok"] is False
+    assert checked[0] is True
+    assert "302" in checked[1]
+
+
 def test_ping_localhost():
     ok, latency = probe.ping("127.0.0.1", 400)
     assert ok is True

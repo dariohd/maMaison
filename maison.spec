@@ -26,6 +26,7 @@ exe = EXE(
     a.datas,
     [],
     name="maMaisonConnectee",
+    icon="assets/maison.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
