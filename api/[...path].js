@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { readCookie, valid } from "../lib/session.js";
-import { formatHouse, load, loadLive, save } from "../lib/store.js";
+import { formatHouse, load, loadLive, loadQueue, updateQueue } from "../lib/store.js";
 
 const BLANK = {
   at: null,
@@ -40,21 +40,28 @@ function online(seenAt) {
   return Boolean(seenAt && Date.now() - seenAt < 25000);
 }
 
-async function enqueue(res, state, method, path) {
-  const pending = state.queue.filter((job) => job.status !== "done");
-  if (pending.length >= 20) {
+async function enqueue(res, houseId, method, path) {
+  const id = crypto.randomUUID();
+  const written = await updateQueue(houseId, (queue) => {
+    const pending = queue.filter((job) => job.status !== "done");
+    if (pending.length >= 20) return { abort: "full" };
+    queue.push({
+      id,
+      method,
+      path,
+      status: "pending",
+      createdAt: Date.now(),
+    });
+    return { expect: (fresh) => fresh.some((job) => job.id === id) };
+  });
+  if (written.abort === "full") {
     send(res, 429, { detail: "Trop de commandes en attente." });
     return;
   }
-  const id = crypto.randomUUID();
-  state.queue.push({
-    id,
-    method,
-    path,
-    status: "pending",
-    createdAt: Date.now(),
-  });
-  await save(state);
+  if (!written.ok) {
+    send(res, 503, { detail: "Réessaie." });
+    return;
+  }
   send(res, 200, { queued: true, id, detail: "Commande envoyée à la maison." });
 }
 
@@ -121,7 +128,8 @@ export default async function handler(req, res) {
     return;
   }
   if (method === "GET" && parts[0] === "jobs" && parts[1]) {
-    const job = state.queue.find((item) => item.id === parts[1]);
+    const queue = (await loadQueue(state.id)) || state.queue || [];
+    const job = queue.find((item) => item.id === parts[1]);
     if (!job) {
       send(res, 404, { detail: "Commande introuvable" });
       return;
@@ -130,7 +138,7 @@ export default async function handler(req, res) {
     return;
   }
   if (method === "POST" && parts.length === 1 && parts[0] === "check") {
-    await enqueue(res, state, "POST", "/api/check");
+    await enqueue(res, state.id, "POST", "/api/check");
     return;
   }
   if (
@@ -141,7 +149,7 @@ export default async function handler(req, res) {
     && /^\d+$/.test(parts[1] || "")
     && /^\d+$/.test(parts[3] || "")
   ) {
-    await enqueue(res, state, "POST", `/api/devices/${parts[1]}/actions/${parts[3]}/run`);
+    await enqueue(res, state.id, "POST", `/api/devices/${parts[1]}/actions/${parts[3]}/run`);
     return;
   }
   if (method !== "GET") {

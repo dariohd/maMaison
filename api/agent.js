@@ -1,5 +1,5 @@
 import { checkToken } from "../lib/secrets.js";
-import { load, normalizeHouse, save, saveLive } from "../lib/store.js";
+import { load, normalizeHouse, saveLive, updateQueue } from "../lib/store.js";
 
 function send(res, code, body) {
   res.statusCode = code;
@@ -34,37 +34,43 @@ export default async function handler(req, res) {
     send(res, 401, { detail: "Jeton refusé" });
     return;
   }
-  const now = Date.now();
-  let authChanged = false;
-  const results = new Map((body.results || []).map((item) => [item.id, item.result]));
-  for (const job of state.queue) {
-    if (results.has(job.id)) {
-      job.status = "done";
-      job.result = results.get(job.id);
-      job.doneAt = now;
-      authChanged = true;
-    } else if (job.status === "sent" && now - (job.sentAt || 0) > 30000) {
-      job.status = "pending";
-      authChanged = true;
-    }
-  }
-  const before = state.queue.length;
-  state.queue = state.queue.filter((job) => job.status !== "done" || now - (job.doneAt || 0) < 120000);
-  if (state.queue.length !== before) authChanged = true;
   if (body.snapshot) await saveLive(house, body.snapshot);
-  if (state.snapshot) {
-    delete state.snapshot;
-    delete state.seenAt;
-    authChanged = true;
-  }
-  const commands = state.queue.filter((job) => job.status === "pending").slice(0, 4);
-  for (const job of commands) {
-    job.status = "sent";
-    job.sentAt = now;
-    authChanged = true;
-  }
-  if (authChanged) await save(state);
-  send(res, 200, {
-    commands: commands.map((job) => ({ id: job.id, method: job.method, path: job.path })),
+  const results = new Map((body.results || []).map((item) => [item.id, item.result]));
+  const taken = [];
+  const written = await updateQueue(house, (queue) => {
+    taken.length = 0;
+    const now = Date.now();
+    let changed = false;
+    for (const job of queue) {
+      if (results.has(job.id)) {
+        job.status = "done";
+        job.result = results.get(job.id);
+        job.doneAt = now;
+        changed = true;
+      } else if (job.status === "sent" && now - (job.sentAt || 0) > 30000) {
+        job.status = "pending";
+        changed = true;
+      }
+    }
+    const kept = queue.filter((job) => job.status !== "done" || now - (job.doneAt || 0) < 120000);
+    if (kept.length !== queue.length) changed = true;
+    queue.splice(0, queue.length, ...kept);
+    const commands = queue.filter((job) => job.status === "pending").slice(0, 4);
+    for (const job of commands) {
+      job.status = "sent";
+      job.sentAt = now;
+      taken.push({ id: job.id, method: job.method, path: job.path });
+      changed = true;
+    }
+    if (!changed) return { skip: true };
+    const ids = taken.map((item) => item.id);
+    return {
+      expect: (fresh) => ids.every((id) => fresh.some((job) => job.id === id && job.status === "sent")),
+    };
   });
+  if (!written.ok) {
+    send(res, 503, { detail: "Réessaie." });
+    return;
+  }
+  send(res, 200, { commands: taken });
 }

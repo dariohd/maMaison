@@ -1,6 +1,6 @@
 import QRCode from "qrcode";
 import { checkToken } from "../lib/secrets.js";
-import { formatHouse, load, normalizeHouse, save } from "../lib/store.js";
+import { formatHouse, load, normalizeHouse, update } from "../lib/store.js";
 import { generateSecret, matchTotp, otpauth } from "../lib/totp.js";
 
 function send(res, code, body) {
@@ -43,23 +43,41 @@ export default async function handler(req, res) {
     send(res, 401, { detail: "Jeton refusé" });
     return;
   }
-  if (body.rotate) {
+  if (body.rotate === true) {
     const secret = generateSecret();
-    state.totpSecret = secret;
-    state.lastTotpStep = 0;
-    state.sessionEpoch = (Number(state.sessionEpoch) || 0) + 1;
-    await save(state);
-    const code = formatHouse(state.id);
+    const outcome = await update(house, (current) => {
+      const epoch = (Number(current.sessionEpoch) || 0) + 1;
+      current.totpSecret = secret;
+      current.lastTotpStep = 0;
+      current.totpReady = false;
+      current.sessionEpoch = epoch;
+      return {
+        expect: (fresh) => fresh.totpSecret === secret && (Number(fresh.sessionEpoch) || 0) >= epoch,
+      };
+    });
+    if (!outcome.ok) {
+      send(res, 503, { detail: "Réessaie." });
+      return;
+    }
+    const code = formatHouse(house);
     send(res, 200, { secret, qr: await qrFor(secret, code), house: code });
     return;
   }
-  const step = matchTotp(state.totpSecret, body.code, Date.now(), state.lastTotpStep || 0);
-  if (!step) {
+  const outcome = await update(house, (current) => {
+    const step = matchTotp(current.totpSecret, body.code, Date.now(), current.lastTotpStep || 0);
+    if (!step) return { abort: "otp" };
+    current.lastTotpStep = step;
+    current.totpReady = true;
+    const secret = current.totpSecret;
+    return { expect: (fresh) => fresh.lastTotpStep === step && fresh.totpSecret === secret };
+  });
+  if (outcome.abort === "otp") {
     send(res, 400, { detail: "Code incorrect. Regarde les 6 chiffres de l'application." });
     return;
   }
-  state.lastTotpStep = step;
-  state.totpReady = true;
-  await save(state);
+  if (!outcome.ok) {
+    send(res, 503, { detail: "Réessaie." });
+    return;
+  }
   send(res, 200, { ok: true });
 }

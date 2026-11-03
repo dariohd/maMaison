@@ -39,9 +39,17 @@ export default async function handler(req, res) {
     return;
   }
   let id = newHouseId();
+  let free = false;
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    if (!(await load(id))) break;
+    if (!(await load(id))) {
+      free = true;
+      break;
+    }
     id = newHouseId();
+  }
+  if (!free) {
+    send(res, 503, { detail: "La maison n'a pas pu être créée. Réessaie." });
+    return;
   }
   const token = newToken();
   const secret = generateSecret();
@@ -54,6 +62,7 @@ export default async function handler(req, res) {
     totpReady: false,
     lastTotpStep: 0,
     loginFailures: 0,
+    loginFailureMarks: [],
     loginLockedUntil: 0,
     sessionEpoch: 0,
     snapshot: null,

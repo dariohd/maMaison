@@ -3,8 +3,36 @@ import socket
 import sys
 import threading
 import time
+import traceback
 
 PUBLIC_URL = "https://mamaisonconnectee.vercel.app"
+
+
+def keep_stdio() -> None:
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        from app.paths import home_root
+
+        folder = home_root() / "data"
+        folder.mkdir(parents=True, exist_ok=True)
+        handle = open(folder / "programme.log", "a", encoding="utf-8")
+    except OSError:
+        handle = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = handle
+    if sys.stderr is None:
+        sys.stderr = handle
+
+
+def tell(text: str, error: bool = False) -> None:
+    if sys.platform == "win32":
+        import ctypes
+
+        flags = 0x10 if error else 0x40
+        ctypes.windll.user32.MessageBoxW(None, text, "maMaisonConnectee", flags)
+        return
+    print(text, file=sys.stderr)
 
 
 def port_free(port: int) -> bool:
@@ -26,14 +54,17 @@ def wait_until_up(port: int) -> None:
                 return
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError("Le programme n'a pas demarre.")
+    raise RuntimeError("Le programme n'a pas démarré.")
 
 
 def serve(port: int) -> None:
-    import uvicorn
-    from app.main import app
+    try:
+        import uvicorn
+        from app.main import app
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    except Exception:
+        traceback.print_exc()
 
 
 def open_window(port: int) -> None:
@@ -50,20 +81,25 @@ def open_window(port: int) -> None:
 
 
 def main() -> None:
+    keep_stdio()
     os.environ.setdefault("PYTHONUTF8", "1")
-    port = int(os.environ.get("MAISON_PORT", "8787"))
-    print("maMaisonConnectee")
-    print("La fenetre du programme est l'ecran de la maison. Laisse-la ouverte.")
-    print("Le telephone ouvre : " + PUBLIC_URL)
+    try:
+        port = int(os.environ.get("MAISON_PORT", "8787"))
+    except ValueError:
+        tell("Le programme n'a pas démarré.", error=True)
+        return
     if not port_free(port):
-        print("maMaisonConnectee est deja ouvert sur cet ordinateur.")
-        input("Appuyez sur Entree pour fermer.")
+        tell("maMaisonConnectee est déjà ouvert sur cet ordinateur.")
         return
     if os.environ.get("MAISON_OPEN_BROWSER", "1") == "0":
         serve(port)
         return
     threading.Thread(target=serve, args=(port,), daemon=True).start()
-    wait_until_up(port)
+    try:
+        wait_until_up(port)
+    except RuntimeError:
+        tell("Le programme n'a pas démarré.", error=True)
+        return
     open_window(port)
 
 
@@ -72,3 +108,7 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         sys.exit(0)
+    except Exception:
+        traceback.print_exc()
+        tell("Le programme a rencontré une erreur.", error=True)
+        sys.exit(1)
