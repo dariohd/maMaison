@@ -8,21 +8,73 @@ import traceback
 PUBLIC_URL = "https://mamaisonconnectee.vercel.app"
 
 
-def keep_stdio() -> None:
-    if sys.stdout is not None and sys.stderr is not None:
-        return
+def log_path():
     try:
         from app.paths import home_root
 
         folder = home_root() / "data"
         folder.mkdir(parents=True, exist_ok=True)
-        handle = open(folder / "programme.log", "a", encoding="utf-8")
+        return folder / "programme.log"
+    except OSError:
+        return None
+
+
+def keep_stdio() -> None:
+    path = log_path()
+    try:
+        handle = open(path, "a", encoding="utf-8") if path else open(os.devnull, "w", encoding="utf-8")
     except OSError:
         handle = open(os.devnull, "w", encoding="utf-8")
     if sys.stdout is None:
         sys.stdout = handle
     if sys.stderr is None:
         sys.stderr = handle
+    try:
+        import logging
+
+        logging.basicConfig(
+            stream=handle,
+            level=logging.WARNING,
+            format="%(asctime)s %(name)s %(message)s",
+            force=True,
+        )
+    except Exception:
+        pass
+
+
+def catch_window_errors() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import System
+        import System.Windows.Forms as WinForms
+    except Exception:
+        return
+    try:
+        WinForms.Application.SetUnhandledExceptionMode(WinForms.UnhandledExceptionMode.CatchException)
+    except Exception:
+        pass
+
+    def on_thread(_sender, args) -> None:
+        try:
+            print("fenetre: " + str(getattr(args, "Exception", args)), file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+    def on_domain(_sender, args) -> None:
+        try:
+            print("fenetre: " + str(getattr(args, "ExceptionObject", args)), file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+    try:
+        WinForms.Application.ThreadException += on_thread
+    except Exception:
+        pass
+    try:
+        System.AppDomain.CurrentDomain.UnhandledException += on_domain
+    except Exception:
+        pass
 
 
 def tell(text: str, error: bool = False) -> None:
@@ -69,14 +121,17 @@ def serve(port: int) -> None:
 
 def open_window(port: int) -> None:
     import webview
+    from app.paths import home_root
     from app.service import Tray, icon_path
 
+    catch_window_errors()
     window = webview.create_window(
         "maMaisonConnectee",
         f"http://127.0.0.1:{port}",
         width=1180,
         height=820,
         min_size=(860, 640),
+        background_color="#d7e1ec",
     )
     tray = Tray(window)
 
@@ -89,16 +144,22 @@ def open_window(port: int) -> None:
 
     window.events.closing += on_closing
     icon = icon_path()
-    if icon.exists():
-        try:
-            window.set_icon(str(icon))
-        except Exception:
-            pass
+    storage = home_root() / "data" / "webview"
+    storage.mkdir(parents=True, exist_ok=True)
 
     def after_start():
-        tray.start()
+        try:
+            tray.start()
+        except Exception:
+            traceback.print_exc()
 
-    webview.start(after_start)
+    webview.start(
+        after_start,
+        gui="edgechromium",
+        private_mode=False,
+        storage_path=str(storage),
+        icon=str(icon) if icon.exists() else None,
+    )
 
 
 def main() -> None:

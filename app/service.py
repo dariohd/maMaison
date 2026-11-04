@@ -138,12 +138,22 @@ class Tray:
 
     def start(self) -> None:
         try:
+            import ctypes
+
             import pystray
             from PIL import Image
         except Exception:
             return
+        try:
+            ctypes.windll.user32.DestroyIcon.errcheck = None
+            ctypes.windll.user32.DestroyCursor.errcheck = None
+        except Exception:
+            pass
         path = icon_path()
-        image = Image.open(path) if path.exists() else Image.new("RGBA", (32, 32), (29, 79, 134, 255))
+        try:
+            image = Image.open(path) if path.exists() else Image.new("RGBA", (32, 32), (29, 79, 134, 255))
+        except Exception:
+            image = Image.new("RGBA", (32, 32), (29, 79, 134, 255))
         menu = pystray.Menu(
             pystray.MenuItem("Ouvrir", lambda: self.show(), default=True),
             pystray.MenuItem("Quitter", lambda: self.quit()),
