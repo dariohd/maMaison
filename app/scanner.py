@@ -46,6 +46,15 @@ def is_home_network(network: ipaddress.IPv4Network) -> bool:
     return any(network.subnet_of(block) for block in HOME_BLOCKS)
 
 
+def parse_subnets(value: str) -> list[ipaddress.IPv4Network]:
+    parts = [item.strip() for item in re.split(r"[\n,;]+", value or "") if item.strip()]
+    if not parts:
+        return []
+    if len(parts) > 6:
+        raise ValueError("Indique au plus 6 réseaux.")
+    return [parse_subnet(item) for item in parts]
+
+
 def parse_subnet(value: str) -> ipaddress.IPv4Network:
     try:
         network = ipaddress.ip_network(value.strip(), strict=False)
@@ -300,6 +309,17 @@ def suggest(obs: dict) -> tuple[str | None, str, int | None]:
     return type_name, "ping", None
 
 
+def suggested_name(obs: dict, type_name: str | None) -> str:
+    host = (obs.get("hostname") or "").split(".")[0].strip()
+    if host and host.lower() not in {"unknown", "localhost"}:
+        return host[:80]
+    if obs.get("is_gateway"):
+        return "Box"
+    if type_name:
+        return type_name
+    return f"Appareil {obs.get('ip') or ''}".strip()
+
+
 def decorate(obs: dict) -> dict:
     type_name, protocol, port = suggest(obs)
     return {
@@ -307,6 +327,7 @@ def decorate(obs: dict) -> dict:
         "suggested_type": type_name,
         "suggested_protocol": protocol,
         "suggested_port": port,
+        "suggested_name": suggested_name(obs, type_name),
     }
 
 
@@ -320,18 +341,23 @@ def ip_sort(value: str) -> tuple:
 def classify(observations: list[dict], devices: list[dict]) -> dict:
     by_mac = {}
     by_ip = {}
+    by_host = {}
     for device in devices:
         mac = (device.get("mac") or "").upper()
         if mac:
             by_mac[mac] = device
         if device.get("ip"):
             by_ip[device["ip"]] = device
+        host = (device.get("hostname") or "").lower()
+        if host:
+            by_host[host] = device
     changed, known, fresh, conflicts = [], [], [], []
     for obs in observations:
         mac = (obs.get("mac") or "").upper()
         ip = obs["ip"]
         mac_hit = by_mac.get(mac) if mac else None
         ip_hit = by_ip.get(ip)
+        host_hit = by_host.get((obs.get("hostname") or "").lower()) if obs.get("hostname") else None
         if mac_hit and mac_hit["ip"] != ip:
             changed.append(
                 {
@@ -353,6 +379,15 @@ def classify(observations: list[dict], devices: list[dict]) -> dict:
             )
         elif ip_hit:
             known.append({**obs, "device_id": ip_hit["id"], "device_name": ip_hit["name"]})
+        elif host_hit and not host_hit.get("mac"):
+            changed.append(
+                {
+                    **obs,
+                    "device_id": host_hit["id"],
+                    "device_name": host_hit["name"],
+                    "previous_ip": host_hit["ip"],
+                }
+            )
         else:
             fresh.append(obs)
     for bucket in (changed, known, fresh, conflicts):

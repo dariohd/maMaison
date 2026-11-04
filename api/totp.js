@@ -1,4 +1,5 @@
 import QRCode from "qrcode";
+import { hide, reveal } from "../lib/box.js";
 import { checkToken } from "../lib/secrets.js";
 import { formatHouse, load, normalizeHouse, update } from "../lib/store.js";
 import { generateSecret, matchTotp, otpauth } from "../lib/totp.js";
@@ -43,16 +44,24 @@ export default async function handler(req, res) {
     send(res, 401, { detail: "Jeton refusé" });
     return;
   }
+  if (body.sync === true) {
+    send(res, 200, { secret: reveal(state.totpSecret) });
+    return;
+  }
   if (body.rotate === true) {
+    if (!process.env.SESSION_SECRET) {
+      send(res, 503, { detail: "La page publique n'est pas prête." });
+      return;
+    }
     const secret = generateSecret();
     const outcome = await update(house, (current) => {
       const epoch = (Number(current.sessionEpoch) || 0) + 1;
-      current.totpSecret = secret;
+      current.totpSecret = hide(secret);
       current.lastTotpStep = 0;
       current.totpReady = false;
       current.sessionEpoch = epoch;
       return {
-        expect: (fresh) => fresh.totpSecret === secret && (Number(fresh.sessionEpoch) || 0) >= epoch,
+        expect: (fresh) => reveal(fresh.totpSecret) === secret && (Number(fresh.sessionEpoch) || 0) >= epoch,
       };
     });
     if (!outcome.ok) {
@@ -64,7 +73,7 @@ export default async function handler(req, res) {
     return;
   }
   const outcome = await update(house, (current) => {
-    const step = matchTotp(current.totpSecret, body.code, Date.now(), current.lastTotpStep || 0);
+    const step = matchTotp(reveal(current.totpSecret), body.code, Date.now(), current.lastTotpStep || 0);
     if (!step) return { abort: "otp" };
     current.lastTotpStep = step;
     current.totpReady = true;

@@ -35,9 +35,12 @@ export default async function handler(req, res) {
     return;
   }
   if (body.snapshot) await saveLive(house, body.snapshot);
+  const waitUntil = Date.now() + Math.min(8, Math.max(0, Number(body.wait) || 0)) * 1000;
   const results = new Map((body.results || []).map((item) => [item.id, item.result]));
   const taken = [];
-  const written = await updateQueue(house, (queue) => {
+  let written;
+  do {
+    written = await updateQueue(house, (queue) => {
     taken.length = 0;
     const now = Date.now();
     let changed = false;
@@ -59,7 +62,7 @@ export default async function handler(req, res) {
     for (const job of commands) {
       job.status = "sent";
       job.sentAt = now;
-      taken.push({ id: job.id, method: job.method, path: job.path });
+      taken.push({ id: job.id, method: job.method, path: job.path, body: job.body || null });
       changed = true;
     }
     if (!changed) return { skip: true };
@@ -68,9 +71,12 @@ export default async function handler(req, res) {
       expect: (fresh) => ids.every((id) => fresh.some((job) => job.id === id && job.status === "sent")),
     };
   });
-  if (!written.ok) {
-    send(res, 503, { detail: "Réessaie." });
-    return;
-  }
+    if (!written.ok) {
+      send(res, 503, { detail: "Réessaie." });
+      return;
+    }
+    if (taken.length || Date.now() >= waitUntil) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  } while (Date.now() < waitUntil);
   send(res, 200, { commands: taken });
 }

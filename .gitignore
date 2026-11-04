@@ -3,9 +3,12 @@ __pycache__/
 **/__pycache__/
 data/*.db
 data/*.db-*
+data/distant.json
+data/jobs.json
+data/programme.log
+data/coffre.key
 *.pyc
 .pytest_cache/
 node_modules/
-data/distant.json
 build/
 dist/

@@ -1,4 +1,8 @@
 fastapi>=0.115
 uvicorn>=0.32
+python-multipart>=0.0.9
 segno>=1.6
 pywebview>=5.0
+pystray>=0.19
+pillow>=10.0
+paho-mqtt>=2.0

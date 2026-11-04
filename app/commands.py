@@ -1,4 +1,5 @@
 import base64
+import re
 import shutil
 import ssl
 import subprocess
@@ -93,10 +94,12 @@ def clean_action(fields: dict) -> dict:
     if not label or len(label) > 40:
         raise CommandError("Indique un nom de commande, 40 caractères au plus.")
     kind = fields.get("kind") or "http"
-    if kind not in {"http", "stream"}:
+    if kind not in {"http", "stream", "mqtt"}:
         raise CommandError("Commande inconnue.")
     method = (fields.get("method") or "").strip()
-    if kind == "http":
+    if kind == "mqtt":
+        method = "PUB"
+    elif kind == "http":
         method = method.upper() or "GET"
         if method not in HTTP_METHODS:
             raise CommandError("Méthode inconnue.")
@@ -107,7 +110,7 @@ def clean_action(fields: dict) -> dict:
     path = (fields.get("path") or "/").strip() or "/"
     if "://" in path or path.startswith("//") or "\\" in path:
         raise CommandError("Le chemin reste sur l'appareil, par exemple /open.")
-    if not path.startswith("/"):
+    if kind != "mqtt" and not path.startswith("/"):
         path = "/" + path
     if len(path) > 300:
         raise CommandError("Le chemin est trop long.")
@@ -123,9 +126,14 @@ def clean_action(fields: dict) -> dict:
         "kind": kind,
         "method": method,
         "path": path,
-        "body": body if kind == "http" else "",
+        "body": "" if kind == "stream" else body,
         "auth_user": auth_user,
         "auth_pass": auth_pass,
+        "confirm": (fields.get("confirm") or "").strip(),
+        "value_kind": (fields.get("value_kind") or "").strip(),
+        "value_min": fields.get("value_min"),
+        "value_max": fields.get("value_max"),
+        "value_step": fields.get("value_step"),
     }
 
 
@@ -142,8 +150,35 @@ def http_origin(device: dict) -> str:
     return f"{scheme}://{device['ip']}:{int(port)}"
 
 
+_NUMBER = re.compile(r"^[0-9]{1,8}([.][0-9]{1,4})?$")
+_MQTT = re.compile(r"^[A-Za-z0-9._:-]{1,32}$")
+
+
+def clean_command_value(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise CommandError("Indique une consigne.")
+    if not _NUMBER.fullmatch(text):
+        raise CommandError("La consigne doit être un nombre.")
+    return text
+
+
+def clean_mqtt_value(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text or not _MQTT.fullmatch(text):
+        raise CommandError("La consigne MQTT n'est pas acceptée.")
+    return text
+
+
+def fill_value(text: str, value: str | None) -> str:
+    raw = text or ""
+    if "{value}" not in raw:
+        return raw
+    return raw.replace("{value}", clean_command_value(value))
+
+
 def target_url(device: dict, action: dict) -> str:
-    path = action["path"]
+    path = fill_value(action["path"], action.get("value"))
     if action["kind"] == "stream" and action["method"] == "rtsp":
         port = device.get("port") if device.get("protocol") == "rtsp" and device.get("port") else 554
         auth = ""
@@ -174,7 +209,7 @@ def _request(device: dict, action: dict, timeout: float):
     data = None
     method = action["method"] if action["kind"] == "http" else "GET"
     if action["kind"] == "http" and method not in {"GET", "DELETE"}:
-        data = (action.get("body") or "").encode("utf-8")
+        data = fill_value(action.get("body") or "", action.get("value")).encode("utf-8")
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("User-Agent", "maMaisonConnectee/1.0")
     request.add_header("Connection", "close")
@@ -186,7 +221,40 @@ def _request(device: dict, action: dict, timeout: float):
     return _opener().open(request, timeout=timeout)
 
 
+def fingerprint(device: dict) -> str:
+    if device.get("protocol") != "https":
+        return ""
+    import hashlib
+    import socket as sockmod
+
+    host = device["ip"]
+    port = int(device.get("port") or 443)
+    try:
+        raw = ssl.get_server_certificate((host, port), timeout=3)
+        der = ssl.PEM_cert_to_DER_cert(raw)
+        return hashlib.sha256(der).hexdigest()
+    except Exception:
+        try:
+            with sockmod.create_connection((host, port), 3) as sock:
+                ctx = ssl._create_unverified_context()
+                with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                    der = tls.getpeercert(True) or b""
+            return hashlib.sha256(der).hexdigest() if der else ""
+        except Exception:
+            return ""
+
+
 def run_http(device: dict, action: dict) -> dict:
+    if device.get("transport") == "mqtt" or action.get("kind") == "mqtt":
+        from app import bus
+
+        return bus.publish_mqtt(device, action, action.get("value"))
+    if device.get("protocol") == "https":
+        if not device.get("cert_fp"):
+            return {"ok": False, "detail": "Confirme le certificat dans la fiche."}
+        current = fingerprint(device)
+        if current and current != device.get("cert_fp"):
+            return {"ok": False, "detail": "Le certificat de l'appareil a changé. Confirme-le dans la fiche."}
     timeout = probe.timeouts()["http_timeout_s"]
     try:
         with _request(device, action, timeout) as response:
@@ -201,6 +269,8 @@ def run_http(device: dict, action: dict) -> dict:
         if 300 <= exc.code < 400:
             return {"ok": False, "detail": "L'appareil a renvoyé ailleurs."}
         return {"ok": 200 <= exc.code < 300, "detail": f"HTTP {exc.code}"}
+    except CommandError as exc:
+        return {"ok": False, "detail": str(exc)}
     except (TimeoutError, urllib.error.URLError):
         return {"ok": False, "detail": "Appareil injoignable"}
     except Exception:
@@ -277,3 +347,28 @@ def stream_response(device: dict, action: dict):
             response.close()
 
     return chunks(), content_type
+
+
+def capture_jpeg(device: dict, action: dict) -> dict:
+    timeout = max(probe.timeouts()["http_timeout_s"], 6)
+    try:
+        response = _request(device, {**action, "kind": "http", "method": "GET"}, timeout)
+        data = response.read(450000)
+        response.close()
+    except Exception as exc:
+        raise CommandError("Image injoignable") from exc
+    if data[:3] != b"\xff\xd8":
+        start = data.find(b"\xff\xd8")
+        end = data.find(b"\xff\xd9")
+        if start >= 0 and end > start:
+            data = data[start:end + 2]
+        else:
+            raise CommandError("Cette page n'est pas une image.")
+    if len(data) > 400000:
+        raise CommandError("L'image est trop lourde.")
+    return {
+        "ok": True,
+        "detail": "Image reçue.",
+        "image": base64.b64encode(data).decode("ascii"),
+        "mime": "image/jpeg",
+    }

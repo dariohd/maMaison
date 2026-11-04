@@ -8,6 +8,7 @@ test("une session nomme la maison et sa generation", () => {
   const session = valid(token);
   assert.equal(session.house, "AB12CD34");
   assert.equal(session.epoch, 3);
+  assert.equal(session.sessionId.length > 3, true);
   assert.equal(valid("AB12CD34.1.0.nope"), null);
   assert.equal(valid(""), null);
 });

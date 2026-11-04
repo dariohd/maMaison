@@ -379,3 +379,223 @@ def test_ping_localhost():
     ok, latency = probe.ping("127.0.0.1", 400)
     assert ok is True
     assert latency is not None
+
+
+def test_daily_house_extras():
+    from app import backup, commands, readings, scenes as scene_run
+
+    db.init_db()
+    assert scanner.suggested_name({"hostname": "cam-garage", "ip": "192.168.1.8"}, "Caméra") == "cam-garage"
+    assert scanner.suggested_name({"hostname": "", "ip": "192.168.1.1", "is_gateway": True}, "Routeur") == "Box"
+    nets = scanner.parse_subnets("192.168.1.0/24\n10.0.0.0/24")
+    assert [str(item) for item in nets] == ["192.168.1.0/24", "10.0.0.0/24"]
+    assert commands.fill_value("/level/{value}", "40") == "/level/40"
+    try:
+        commands.fill_value("/level/{value}", "40\r\nHost: x")
+    except commands.CommandError:
+        pass
+    else:
+        raise AssertionError("consigne dangereuse")
+    assert readings.parse_reading("temperature", '{"temperature": 21.5}') == "21.5 °C"
+    assert readings.parse_reading("on", '{"ison": true}') == "Marche"
+    assert readings.parse_reading("position", '{"position": 80}') == "80 %"
+    mqtt = commands.clean_action({"label": "Marche", "kind": "mqtt", "path": "house/light", "body": "ON"})
+    assert mqtt["kind"] == "mqtt"
+    assert mqtt["body"] == "ON"
+    assert mqtt["method"] == "PUB"
+
+    type_id = next(item["id"] for item in db.list_types() if item["name"] == "Volet")
+    pinned_id = db.insert_device(
+        {
+            "name": "Zelda",
+            "type_id": type_id,
+            "room_id": None,
+            "ip": "192.168.51.10",
+            "mac": "AA:BB:CC:DD:EE:A1",
+            "hostname": "",
+            "port": None,
+            "protocol": "ping",
+            "http_path": "/",
+            "notes": "",
+            "pinned": 1,
+            "important": 1,
+        }
+    )
+    other_id = db.insert_device(
+        {
+            "name": "Aaa",
+            "type_id": type_id,
+            "room_id": None,
+            "ip": "192.168.51.11",
+            "mac": "AA:BB:CC:DD:EE:A2",
+            "hostname": "",
+            "port": None,
+            "protocol": "ping",
+            "http_path": "/",
+            "notes": "",
+        }
+    )
+    board = db.dashboard()
+    assert board["devices"][0]["id"] == pinned_id
+    db.add_alert(pinned_id, "Appareil important muet.")
+    assert any(item["message"].startswith("Appareil") for item in db.list_alerts(unread=True))
+
+    action = db.insert_action(
+        pinned_id,
+        commands.clean_action({"label": "Stop", "kind": "http", "method": "GET", "path": "/stop", "confirm": "tap", "value_kind": "level"}),
+    )
+    assert action["confirm"] == "tap"
+    scene = db.insert_scene("Tout fermer", [{"device_id": pinned_id, "action_id": action["id"]}])
+    original = commands.run_http
+    commands.run_http = lambda *_args, **_kwargs: {"ok": True, "detail": "HTTP 200"}
+    try:
+        result = scene_run.run_scene(scene["id"])
+        assert result["ok"] is True
+        totp_action = db.insert_action(
+            pinned_id,
+            commands.clean_action({"label": "Verrou", "kind": "http", "method": "GET", "path": "/lock", "confirm": "totp"}),
+        )
+        locked_scene = db.insert_scene("Verrouiller", [{"device_id": pinned_id, "action_id": totp_action["id"]}])
+        blocked = scene_run.run_scene(locked_scene["id"])
+        assert blocked["ok"] is False
+        timed = scene_run.run_scene(locked_scene["id"], source="horaire")
+        assert timed["ok"] is False
+    finally:
+        commands.run_http = original
+    assert db.list_command_log(pinned_id)
+
+    host_id = db.insert_device(
+        {
+            "name": "Lampe salon",
+            "type_id": type_id,
+            "room_id": None,
+            "ip": "192.168.51.12",
+            "mac": None,
+            "hostname": "lampe-salon",
+            "port": None,
+            "protocol": "ping",
+            "http_path": "/",
+            "notes": "",
+        }
+    )
+    moved = db.retarget_by_hostname({"lampe-salon": "192.168.51.44"})
+    assert moved[0]["new_ip"] == "192.168.51.44"
+    assert db.get_device(host_id)["ip"] == "192.168.51.44"
+
+    blob = backup.export_bytes()
+    assert blob[:2] == b"PK"
+    assert distant.allowed("POST", "/api/devices/1/actions/2/picture")
+    assert distant.allowed("PUT", "/api/devices/3")
+    assert distant.allowed("POST", "/api/scenes/1/run")
+    assert distant.allowed("POST", "/api/alerts/read")
+
+    with TestClient(app) as client:
+        listed = client.get("/api/scenes")
+        assert listed.status_code == 200
+        assert any(item["name"] == "Tout fermer" for item in listed.json())
+        packed = client.get("/api/backup")
+        assert packed.status_code == 200
+        assert "zip" in packed.headers.get("content-type", "")
+        db.delete_device(pinned_id)
+        db.delete_device(other_id)
+        db.delete_device(host_id)
+
+
+def test_guess_paths_are_safe():
+    from app.guess import DANGEROUS, guesses_for
+
+    for kind in ("Volet", "Portail", "Serrure", "Ampoule", "Alarme"):
+        for path, method in guesses_for(kind):
+            assert path not in DANGEROUS
+            assert method == "GET"
+
+
+def test_otp_and_vault():
+    from app.otp import _b32decode, _hotp, match_totp
+    from app.vault import lock, unlock
+
+    secret = "JBSWY3DPEHPK3PXP"
+    step = 1234567
+    code = _hotp(_b32decode(secret), step)
+    assert match_totp(secret, code, now=step * 30) == step
+    assert match_totp(secret, code, now=step * 30, last_step=step) == 0
+    assert match_totp(secret, "000000", now=step * 30) == 0
+    assert match_totp(secret, code, now=step * 30, last_step=1_700_000_000_000) == step
+    assert unlock(lock("secret-pass")) == "secret-pass"
+    from app import confirm
+
+    assert confirm.WINDOW_S >= 25
+    armed = confirm.arm_tap(9, 8)
+    assert armed["need"] == "tap"
+    assert confirm.take_tap(9, 8) is None
+    assert confirm.take_tap(9, 8) is not None
+    db.init_db()
+    db.set_settings({"mqtt_pass": "mqtt-secret"})
+    assert db.get_settings()["mqtt_pass"] == "mqtt-secret"
+    with db.session() as conn:
+        stored = conn.execute("SELECT value FROM settings WHERE key = 'mqtt_pass'").fetchone()[0]
+    assert stored != "mqtt-secret"
+    assert stored.startswith("dpapi:") or stored.startswith("xor:")
+
+
+def test_snapshot_hides_lan_and_cert_trust():
+    db.init_db()
+    type_id = next(item["id"] for item in db.list_types() if item["name"] == "Volet")
+    device_id = db.insert_device(
+        {
+            "name": "Volet test",
+            "type_id": type_id,
+            "room_id": None,
+            "ip": "192.168.51.80",
+            "mac": "AA:BB:CC:DD:EE:C8",
+            "hostname": "volet-test",
+            "port": 443,
+            "protocol": "https",
+            "http_path": "/",
+            "notes": "secret lan",
+        }
+    )
+    trusted, changed = db.note_cert(device_id, "aaa")
+    assert trusted == ""
+    assert changed is True
+    trusted, changed = db.note_cert(device_id, "aaa")
+    assert trusted == ""
+    assert changed is False
+    db.trust_cert(device_id, "aaa")
+    trusted, changed = db.note_cert(device_id, "bbb")
+    assert trusted == "aaa"
+    assert changed is True
+    db.trust_cert(device_id, "bbb")
+    found = db.get_device(device_id)
+    assert found["cert_fp"] == "bbb"
+    snap = distant.snapshot()
+    row = next(item for item in snap["devices"] if item["id"] == device_id)
+    assert "mac" not in row
+    assert "ip" not in row
+    assert "notes" not in row
+    assert "hostname" not in row
+    assert snap["network"]["local_ip"] == ""
+    assert snap["network"]["adapters"] == []
+    assert "history" in row
+    db.retarget_by_mac({"192.168.51.81": "AA:BB:CC:DD:EE:C8"})
+    snap = distant.snapshot()
+    row = next(item for item in snap["devices"] if item["id"] == device_id)
+    for entry in row["history"]:
+        assert "old_ip" not in entry
+        assert "new_ip" not in entry
+        assert "changed_at" in entry
+    from app import jobs, service
+
+    assert service.version_newer("1.4.3", "1.5.0") is False
+    assert service.version_newer("1.5.0", "1.5.0") is False
+    assert service.version_newer("1.5.1", "1.5.0") is True
+    assert service.version_newer("v1.6.0", "1.5.0") is True
+    jobs.mark("job-replay")
+    blocked = jobs.recall("job-replay")
+    assert blocked["ok"] is False
+    jobs.finish("job-replay", {"ok": True, "detail": "HTTP 200", "image": "abc"})
+    jobs._memory.pop("job-replay", None)
+    remembered = jobs.recall("job-replay")
+    assert remembered["ok"] is True
+    assert "image" not in remembered
+    db.delete_device(device_id)

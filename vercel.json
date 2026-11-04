@@ -1,5 +1,10 @@
 {
   "rewrites": [
     { "source": "/assets/(.*)", "destination": "/$1" }
-  ]
+  ],
+  "functions": {
+    "api/agent.js": {
+      "maxDuration": 10
+    }
+  }
 }

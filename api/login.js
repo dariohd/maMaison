@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import { locked, noteFailure } from "../lib/guard.js";
-import { checkPassword, hashPassword } from "../lib/secrets.js";
-import { cookieHeader, issue } from "../lib/session.js";
+import { reveal, sealState } from "../lib/box.js";
+import { checkBackup, checkPassword, hashPassword } from "../lib/secrets.js";
+import { cookieHeader, issue, newSessionId } from "../lib/session.js";
 import { formatHouse, load, normalizeHouse, update } from "../lib/store.js";
-import { matchTotp } from "../lib/totp.js";
+import { matchTotp, saneLastTotpStep } from "../lib/totp.js";
 
 const DUMMY = hashPassword("maison-absente-00");
 
@@ -63,26 +64,56 @@ export default async function handler(req, res) {
     return;
   }
   if (locked(present)) {
-    send(res, 429, { detail: "Trop d'essais. Réessaie dans 15 minutes." });
+    checkPassword(password, DUMMY);
+    refuse(res);
     return;
   }
   const outcome = await update(house, (state) => {
     if (locked(state)) return { abort: "locked" };
-    const ok = checkPassword(password, state.passwordHash);
-    const step = ok ? matchTotp(state.totpSecret, body.otp, Date.now(), state.lastTotpStep || 0) : 0;
-    if (!ok || !step) return { abort: "bad" };
-    state.lastTotpStep = step;
+    const otp = String(body.otp || "").replace(/\s/g, "");
+    let person = "owner";
+    let step = 0;
+    let usedBackup = false;
+    const ownerOk = checkPassword(password, state.passwordHash);
+    const ownerLast = saneLastTotpStep(state.lastTotpStep);
+    if (ownerOk) step = matchTotp(reveal(state.totpSecret), otp, Date.now(), ownerLast);
+    if (!step && ownerOk && Array.isArray(state.backupCodes)) {
+      const index = state.backupCodes.findIndex((stored) => checkBackup(otp, stored));
+      if (index >= 0) {
+        usedBackup = true;
+        step = 1;
+        state.backupCodes = state.backupCodes.filter((_, current) => current !== index);
+      }
+    }
+    if (!step) {
+      for (const item of state.people || []) {
+        if (!checkPassword(password, item.passwordHash)) continue;
+        const personStep = matchTotp(reveal(item.totpSecret), otp, Date.now(), saneLastTotpStep(item.lastTotpStep));
+        if (!personStep) continue;
+        item.lastTotpStep = personStep;
+        person = item.id;
+        step = personStep;
+        break;
+      }
+    }
+    if (!ownerOk && person === "owner" && !step) return { abort: "bad" };
+    if (!step) return { abort: "bad" };
+    if (person === "owner") state.lastTotpStep = usedBackup ? ownerLast : step;
     state.loginFailures = 0;
     state.loginFailureMarks = [];
     state.loginLockedUntil = 0;
     state.totpReady = true;
+    sealState(state);
+    const sid = newSessionId();
+    state.sessions = [...(state.sessions || []), { id: sid, person, at: Date.now() }].slice(-20);
+    state.lastLoginSid = sid;
     const epoch = Number(state.sessionEpoch) || 0;
     const hash = state.passwordHash;
     return {
-      expect: (fresh) => fresh.lastTotpStep === step
+      expect: (fresh) => (fresh.sessions || []).some((item) => item.id === sid)
         && fresh.passwordHash === hash
         && (Number(fresh.sessionEpoch) || 0) === epoch
-        && fresh.totpSecret === state.totpSecret,
+        && fresh.lastLoginSid === sid,
     };
   });
   if (outcome.missing) {
@@ -91,7 +122,8 @@ export default async function handler(req, res) {
     return;
   }
   if (outcome.abort === "locked" || (outcome.state && locked(outcome.state))) {
-    send(res, 429, { detail: "Trop d'essais. Réessaie dans 15 minutes." });
+    checkPassword(password, DUMMY);
+    refuse(res);
     return;
   }
   if (!outcome.ok) {
@@ -104,6 +136,8 @@ export default async function handler(req, res) {
     return;
   }
   const saved = outcome.state;
-  res.setHeader("Set-Cookie", cookieHeader(issue(saved.id, Number(saved.sessionEpoch) || 0)));
+  const sid = saved.lastLoginSid || "";
+  const opened = (saved.sessions || []).find((item) => item.id === sid) || {};
+  res.setHeader("Set-Cookie", cookieHeader(issue(saved.id, Number(saved.sessionEpoch) || 0, sid || newSessionId(), opened.person || "owner")));
   send(res, 200, { ok: true, house: formatHouse(saved.id) });
 }

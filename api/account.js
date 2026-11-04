@@ -1,6 +1,8 @@
-import { checkPassword, checkToken, hashPassword } from "../lib/secrets.js";
+import { hide, reveal } from "../lib/box.js";
+import { backupCodes, checkPassword, checkToken, hashPassword } from "../lib/secrets.js";
 import { load, normalizeHouse, update } from "../lib/store.js";
-import { matchTotp } from "../lib/totp.js";
+import { generateSecret, matchTotp, otpauth } from "../lib/totp.js";
+import QRCode from "qrcode";
 
 function send(res, code, body) {
   res.statusCode = code;
@@ -51,10 +53,92 @@ export default async function handler(req, res) {
     send(res, 401, { detail: "Jeton refusé" });
     return;
   }
+  if (body.codes === true) {
+    const fresh = backupCodes();
+    const outcome = await update(house, (state) => {
+      state.backupCodes = fresh.hashes;
+      return { expect: (item) => Array.isArray(item.backupCodes) && item.backupCodes.length === 8 };
+    });
+    if (!outcome.ok) {
+      send(res, 503, { detail: "Réessaie." });
+      return;
+    }
+    send(res, 200, { codes: fresh.raw });
+    return;
+  }
+  if (body.codesLeft === true) {
+    const state = await load(house);
+    send(res, 200, { left: (state.backupCodes || []).length });
+    return;
+  }
+  if (body.people === true) {
+    const state = await load(house);
+    send(res, 200, {
+      people: (state.people || []).map((item) => ({ id: item.id, name: item.name, role: item.role })),
+      codesLeft: (state.backupCodes || []).length,
+    });
+    return;
+  }
+  if (body.addPerson === true) {
+    if (!process.env.SESSION_SECRET) {
+      send(res, 503, { detail: "La page publique n'est pas prête." });
+      return;
+    }
+    const problem = acceptable(body.password);
+    if (problem) {
+      send(res, 400, { detail: problem });
+      return;
+    }
+    const name = String(body.name || "").trim().slice(0, 40);
+    if (!name) {
+      send(res, 400, { detail: "Indique un prénom." });
+      return;
+    }
+    const id = `p${Date.now().toString(36)}`;
+    const secret = generateSecret();
+    const outcome = await update(house, (state) => {
+      state.people = [...(state.people || []), {
+        id,
+        name,
+        role: body.role === "setup" ? "setup" : "use",
+        passwordHash: hashPassword(body.password),
+        totpSecret: hide(secret),
+        lastTotpStep: 0,
+      }].slice(0, 8);
+      return { expect: (item) => (item.people || []).some((person) => person.id === id) };
+    });
+    if (!outcome.ok) {
+      send(res, 503, { detail: "Réessaie." });
+      return;
+    }
+    const { formatHouse } = await import("../lib/store.js");
+    const qr = await QRCode.toString(otpauth(secret, `${formatHouse(house)} ${name}`), { type: "svg", margin: 1, width: 220 });
+    send(res, 200, { id, name, secret, qr });
+    return;
+  }
+  if (body.sessions === true) {
+    const state = await load(house);
+    send(res, 200, { sessions: state.sessions || [] });
+    return;
+  }
+  if (body.dropSession) {
+    const sid = String(body.dropSession);
+    const outcome = await update(house, (state) => {
+      state.sessions = (state.sessions || []).filter((item) => item.id !== sid);
+      return { expect: (item) => !(item.sessions || []).some((row) => row.id === sid) };
+    });
+    if (!outcome.ok) {
+      send(res, 503, { detail: "Réessaie." });
+      return;
+    }
+    send(res, 200, { ok: true });
+    return;
+  }
   if (body.disconnect === true) {
     const outcome = await update(house, (state) => {
       const epoch = (Number(state.sessionEpoch) || 0) + 1;
       state.sessionEpoch = epoch;
+      state.sessions = [];
       return { expect: (fresh) => (Number(fresh.sessionEpoch) || 0) >= epoch };
     });
     if (!outcome.ok) {
@@ -74,7 +158,7 @@ export default async function handler(req, res) {
   const outcome = await update(house, (state) => {
     let step = state.lastTotpStep || 0;
     if (body.reset === true) {
-      step = matchTotp(state.totpSecret, body.otp, Date.now(), state.lastTotpStep || 0);
+      step = matchTotp(reveal(state.totpSecret), body.otp, Date.now(), state.lastTotpStep || 0);
       if (!step) return { abort: "otp" };
       state.lastTotpStep = step;
     } else if (!checkPassword(body.password, state.passwordHash)) {
@@ -83,13 +167,12 @@ export default async function handler(req, res) {
     const epoch = (Number(state.sessionEpoch) || 0) + 1;
     state.passwordHash = hash;
     state.sessionEpoch = epoch;
+    state.sessions = [];
     state.loginFailures = 0;
     state.loginFailureMarks = [];
     state.loginLockedUntil = 0;
     return {
-      expect: (fresh) => fresh.passwordHash === hash
-        && (Number(fresh.sessionEpoch) || 0) >= epoch
-        && fresh.lastTotpStep === step,
+      expect: (fresh) => fresh.passwordHash === hash && (Number(fresh.sessionEpoch) || 0) >= epoch,
     };
   });
   if (outcome.abort === "password") {

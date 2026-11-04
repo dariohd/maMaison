@@ -69,15 +69,36 @@ def serve(port: int) -> None:
 
 def open_window(port: int) -> None:
     import webview
+    from app.service import Tray, icon_path
 
-    webview.create_window(
+    window = webview.create_window(
         "maMaisonConnectee",
         f"http://127.0.0.1:{port}",
         width=1180,
         height=820,
         min_size=(860, 640),
     )
-    webview.start()
+    tray = Tray(window)
+
+    def on_closing():
+        if not tray.ready:
+            tray.quit()
+            return True
+        tray.hide()
+        return False
+
+    window.events.closing += on_closing
+    icon = icon_path()
+    if icon.exists():
+        try:
+            window.set_icon(str(icon))
+        except Exception:
+            pass
+
+    def after_start():
+        tray.start()
+
+    webview.start(after_start)
 
 
 def main() -> None:

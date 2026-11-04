@@ -2,14 +2,14 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hidden = []
-for name in ("uvicorn", "fastapi", "starlette", "anyio", "segno", "webview"):
+for name in ("uvicorn", "fastapi", "starlette", "anyio", "python_multipart", "multipart", "segno", "webview", "pystray", "PIL", "paho"):
     hidden += collect_submodules(name)
 
 a = Analysis(
     ["lancer.py"],
     pathex=["."],
     binaries=[],
-    datas=[("static", "static")],
+    datas=[("static", "static"), ("assets/maison.ico", "assets")],
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

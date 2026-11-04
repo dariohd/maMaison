@@ -1,13 +1,14 @@
 import ipaddress
 import logging
 import os
+import re
 import sqlite3
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -32,6 +33,13 @@ class DeviceBody(BaseModel):
     http_path: str = "/"
     notes: str = ""
     force: bool = False
+    pinned: bool = False
+    important: bool = False
+    reading_kind: str = ""
+    reading_path: str = ""
+    parent_id: int | None = None
+    transport: str = "http"
+    mqtt_topic: str = ""
 
 
 class ProbeBody(BaseModel):
@@ -43,9 +51,17 @@ class ProbeBody(BaseModel):
 
 class SettingsBody(BaseModel):
     subnet: str = ""
+    subnets: str = ""
     ping_timeout_ms: int
     poll_interval_s: int
     http_timeout_s: int
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_pass: str | None = None
+    mqtt_tls: bool = False
+    lite_ui: bool = False
+    autostart: bool = False
 
 
 class NameBody(BaseModel):
@@ -85,6 +101,13 @@ class ActionBody(BaseModel):
     body: str = ""
     auth_user: str = ""
     auth_pass: str = ""
+    confirm: str = ""
+    value_kind: str = ""
+    value_min: float | None = None
+    value_max: float | None = None
+    value_step: float | None = None
+    value: str | None = None
+    otp: str = ""
 
 
 class PresetBody(BaseModel):
@@ -237,6 +260,13 @@ def clean_device(body: DeviceBody, allow_empty_name: bool = False) -> dict:
         "protocol": protocol,
         "http_path": path,
         "notes": notes,
+        "pinned": 1 if body.pinned else 0,
+        "important": 1 if body.important else 0,
+        "reading_kind": (body.reading_kind or "").strip(),
+        "reading_path": clean_path(body.reading_path) if (body.reading_path or "").strip() else "",
+        "parent_id": body.parent_id,
+        "transport": body.transport if body.transport in {"http", "mqtt"} else "http",
+        "mqtt_topic": (body.mqtt_topic or "").strip(),
     }
 
 
@@ -283,10 +313,45 @@ def remember(device_id: int) -> dict:
     return {"device": db.get_device(device_id), "check": result}
 
 
+def apply_guess(device_id: int) -> list[dict]:
+    from app import guess
+
+    device = db.get_device(device_id)
+    if device is None or device.get("protocol") not in {"http", "https"}:
+        return []
+    found = guess.try_paths(device, device.get("type_name") or "Autre")
+    ok = [item for item in found if item.get("ok")]
+    if not ok:
+        return found
+    current = (device.get("http_path") or "/").strip() or "/"
+    if current in {"", "/"}:
+        fields = {**device, "http_path": ok[0]["path"]}
+        db.update_device(device_id, fields, "detection")
+    if not device.get("actions"):
+        for item in ok[:4]:
+            label = item["path"].strip("/").replace("/", " ") or "Page"
+            try:
+                db.insert_action(
+                    device_id,
+                    commands.clean_action(
+                        {
+                            "label": label[:40],
+                            "kind": "http",
+                            "method": item.get("method") or "GET",
+                            "path": item["path"],
+                        }
+                    ),
+                )
+            except commands.CommandError:
+                continue
+    return found
+
+
 def recheck_later(ids: list[int]) -> None:
     def run() -> None:
         for device_id in ids:
             try:
+                apply_guess(device_id)
                 remember(device_id)
             except HTTPException:
                 continue
@@ -310,11 +375,22 @@ def network():
 @app.get("/api/settings")
 def settings():
     raw = db.get_settings()
+    from app import service
+
     return {
         "subnet": raw.get("subnet") or "",
+        "subnets": raw.get("subnets") or raw.get("subnet") or "",
         "ping_timeout_ms": db.get_int_setting("ping_timeout_ms", 400),
         "poll_interval_s": db.get_int_setting("poll_interval_s", 30),
         "http_timeout_s": db.get_int_setting("http_timeout_s", 2),
+        "mqtt_host": raw.get("mqtt_host") or "",
+        "mqtt_port": db.get_int_setting("mqtt_port", 1883),
+        "mqtt_user": raw.get("mqtt_user") or "",
+        "mqtt_tls": raw.get("mqtt_tls") in {"1", "true", "True"},
+        "lite_ui": raw.get("lite_ui") in {"1", "true", "True"},
+        "mqtt_set": bool(raw.get("mqtt_pass")),
+        "autostart": service.autostart_on(),
+        "version": __import__("app.version", fromlist=["VERSION"]).VERSION,
     }
 
 
@@ -352,6 +428,7 @@ def link_house(body: LinkBody):
         "house": created["code"],
         "secret": created["secret"],
         "qr": created["qr"],
+        "codes": created.get("codes") or [],
     }
 
 
@@ -396,26 +473,45 @@ def link_rotate():
 
 @app.put("/api/settings")
 def save_settings(body: SettingsBody):
-    subnet = body.subnet.strip()
-    if subnet:
+    from app import service
+
+    raw_nets = (body.subnets or body.subnet or "").strip()
+    subnet = ""
+    if raw_nets:
         try:
-            subnet = str(scanner.parse_subnet(subnet))
+            nets = scanner.parse_subnets(raw_nets)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        subnet = str(nets[0]) if nets else ""
+        raw_nets = "\n".join(str(item) for item in nets)
     if not 200 <= body.ping_timeout_ms <= 1500:
         raise HTTPException(status_code=400, detail="Le délai de ping doit rester entre 200 et 1500 ms.")
     if not 10 <= body.poll_interval_s <= 3600:
         raise HTTPException(status_code=400, detail="Le contrôle doit rester entre 10 secondes et 1 heure.")
     if not 1 <= body.http_timeout_s <= 6:
         raise HTTPException(status_code=400, detail="Le délai des pages doit rester entre 1 et 6 secondes.")
-    db.set_settings(
-        {
-            "subnet": subnet,
-            "ping_timeout_ms": body.ping_timeout_ms,
-            "poll_interval_s": body.poll_interval_s,
-            "http_timeout_s": body.http_timeout_s,
-        }
-    )
+    if body.mqtt_host and len(body.mqtt_host) > 120:
+        raise HTTPException(status_code=400, detail="L'adresse MQTT est trop longue.")
+    if body.mqtt_user and len(body.mqtt_user) > 80:
+        raise HTTPException(status_code=400, detail="L'identifiant MQTT est trop long.")
+    if body.mqtt_pass is not None and len(body.mqtt_pass) > 80:
+        raise HTTPException(status_code=400, detail="Le mot de passe MQTT est trop long.")
+    payload = {
+        "subnet": subnet,
+        "subnets": raw_nets,
+        "ping_timeout_ms": body.ping_timeout_ms,
+        "poll_interval_s": body.poll_interval_s,
+        "http_timeout_s": body.http_timeout_s,
+        "mqtt_host": body.mqtt_host.strip(),
+        "mqtt_port": max(1, min(body.mqtt_port, 65535)),
+        "mqtt_user": (body.mqtt_user or "").strip()[:80],
+        "mqtt_tls": "1" if body.mqtt_tls else "0",
+        "lite_ui": "1" if body.lite_ui else "0",
+    }
+    if body.mqtt_pass is not None:
+        payload["mqtt_pass"] = body.mqtt_pass
+    db.set_settings(payload)
+    service.set_autostart(body.autostart)
     return settings()
 
 
@@ -533,7 +629,9 @@ def create_device(body: DeviceBody):
             status_code=409,
             detail="Cette fiche entre en conflit avec un appareil déjà enregistré.",
         ) from exc
-    return remember(device_id)
+    result = remember(device_id)
+    recheck_later([device_id])
+    return result
 
 
 @app.put("/api/devices/{device_id}")
@@ -618,15 +716,38 @@ def try_action(device_id: int, body: ActionBody):
     return commands.run_http(device, action)
 
 
+class RunBody(BaseModel):
+    value: str | None = None
+    otp: str = ""
+    tap: bool = False
+
+
 @app.post("/api/devices/{device_id}/actions/{action_id}/run")
-def run_action(device_id: int, action_id: int):
+def run_action(device_id: int, action_id: int, body: RunBody | None = None):
     device = _device_or_404(device_id)
     action = db.get_action(device_id, action_id)
     if action is None:
         raise HTTPException(status_code=404, detail="Commande introuvable.")
-    if action["kind"] != "http":
+    if action["kind"] == "stream":
         raise HTTPException(status_code=400, detail="Cette commande s'affiche, elle ne s'envoie pas.")
-    return commands.run_http(device, action)
+    payload_body = body or RunBody()
+    if action.get("confirm") == "totp":
+        try:
+            distant.verify_action_totp(payload_body.otp or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if action.get("confirm") == "tap":
+        from app import confirm
+
+        if not payload_body.tap:
+            return confirm.arm_tap(device_id, action_id)
+        problem = confirm.take_tap(device_id, action_id)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+    payload = {**action, "value": payload_body.value}
+    result = commands.run_http(device, payload)
+    db.log_command(device_id, action_id, action["label"], result, "maison")
+    return result
 
 
 @app.get("/api/devices/{device_id}/actions/{action_id}/stream")
@@ -747,6 +868,239 @@ def scan_apply(body: ApplyBody):
         ) from exc
     recheck_later(result["created"] + result["updated"])
     return result
+
+
+@app.get("/api/devices/{device_id}/commands")
+def device_commands(device_id: int):
+    _device_or_404(device_id)
+    return db.list_command_log(device_id)
+
+
+@app.post("/api/devices/{device_id}/trust-cert")
+def trust_device_cert(device_id: int):
+    device = _device_or_404(device_id)
+    seen = (device.get("cert_seen") or device.get("cert_fp") or "").strip()
+    if not seen:
+        raise HTTPException(status_code=400, detail="Aucun certificat n'a encore été vu.")
+    db.trust_cert(device_id, seen)
+    return {"ok": True, "cert_fp": seen}
+
+
+@app.post("/api/devices/{device_id}/guess")
+def guess_device(device_id: int):
+    device = _device_or_404(device_id)
+    from app import guess
+
+    return apply_guess(device_id) or guess.try_paths(device, device.get("type_name") or "Autre")
+
+
+@app.post("/api/devices/{device_id}/actions/{action_id}/picture")
+def picture_action(device_id: int, action_id: int):
+    device = _device_or_404(device_id)
+    action = db.get_action(device_id, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Commande introuvable.")
+    try:
+        return commands.capture_jpeg(device, action)
+    except commands.CommandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/devices/{device_id}/bridge")
+def pull_bridge(device_id: int):
+    device = _device_or_404(device_id)
+    path = device.get("reading_path") or device.get("http_path") or "/"
+    result = commands.run_http(
+        device,
+        {"kind": "http", "method": "GET", "path": path, "body": "", "auth_user": "", "auth_pass": ""},
+    )
+    text = str(result.get("detail") or "")
+    payload = text.split(".", 1)[1].strip() if "." in text else text
+    try:
+        data = __import__("json").loads(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Cette page n'est pas une liste d'appareils.") from exc
+    if isinstance(data, dict):
+        data = data.get("devices") or data.get("result") or []
+    if not isinstance(data, list):
+        raise HTTPException(status_code=400, detail="Cette page n'est pas une liste d'appareils.")
+    created = []
+    for item in data[:40]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("id") or "Enfant")[:80]
+        ip = str(item.get("ip") or device["ip"])
+        try:
+            fields = {
+                "name": name,
+                "type_id": device["type_id"],
+                "room_id": device.get("room_id"),
+                "ip": clean_ip(ip),
+                "mac": None,
+                "hostname": str(item.get("id") or "")[:120],
+                "port": device.get("port"),
+                "protocol": device.get("protocol") or "http",
+                "http_path": str(item.get("path") or "/"),
+                "notes": "",
+                "parent_id": device_id,
+                "transport": device.get("transport") or "http",
+                "mqtt_topic": str(item.get("topic") or ""),
+            }
+            created.append(db.insert_device(fields, "detection"))
+        except Exception:
+            continue
+    return {"ok": True, "created": created}
+
+
+@app.get("/api/scenes")
+def scenes_list():
+    return db.list_scenes()
+
+
+class SceneBody(BaseModel):
+    name: str
+    steps: list[dict] = Field(default_factory=list)
+
+
+@app.post("/api/scenes")
+def scenes_create(body: SceneBody):
+    name = clean_label(body.name, "la scène")
+    steps = []
+    for item in body.steps[:20]:
+        steps.append({"device_id": int(item.get("device_id")), "action_id": int(item.get("action_id"))})
+    return db.insert_scene(name, steps)
+
+
+class SceneRunBody(BaseModel):
+    otp: str = ""
+
+
+@app.post("/api/scenes/{scene_id}/run")
+def scenes_run(scene_id: int, body: SceneRunBody | None = None):
+    from app import scenes as scene_run
+
+    return scene_run.run_scene(scene_id, otp=(body.otp if body else "") or "")
+
+
+@app.delete("/api/scenes/{scene_id}")
+def scenes_delete(scene_id: int):
+    if not db.delete_scene(scene_id):
+        raise HTTPException(status_code=404, detail="Scène introuvable.")
+    return {"ok": True}
+
+
+@app.get("/api/schedules")
+def schedules_list():
+    return db.list_schedules()
+
+
+class ScheduleBody(BaseModel):
+    scene_id: int
+    hhmm: str
+    days: str = "1234567"
+
+
+@app.post("/api/schedules")
+def schedules_create(body: ScheduleBody):
+    if not re.fullmatch(r"\d{2}:\d{2}", body.hhmm or ""):
+        raise HTTPException(status_code=400, detail="Indique l'heure, par exemple 07:30.")
+    days = re.sub(r"[^1-7]", "", body.days or "")
+    if not days:
+        raise HTTPException(status_code=400, detail="Indique au moins un jour.")
+    return db.insert_schedule(body.scene_id, body.hhmm, days)
+
+
+@app.post("/api/schedules/{schedule_id}")
+def schedules_toggle(schedule_id: int, body: dict):
+    db.set_schedule(schedule_id, bool(body.get("enabled", True)))
+    return {"ok": True}
+
+
+@app.delete("/api/schedules/{schedule_id}")
+def schedules_delete(schedule_id: int):
+    if not db.delete_schedule(schedule_id):
+        raise HTTPException(status_code=404, detail="Horaire introuvable.")
+    return {"ok": True}
+
+
+@app.get("/api/alerts")
+def alerts_list():
+    return db.list_alerts()
+
+
+@app.post("/api/alerts/read")
+def alerts_read():
+    db.read_alerts()
+    return {"ok": True}
+
+
+@app.get("/api/backup")
+def backup_get():
+    from app import backup
+
+    data = backup.export_bytes()
+    return Response(data, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=maison.zip"})
+
+
+@app.post("/api/backup")
+def backup_put(file: UploadFile = File(...)):
+    from app import backup
+
+    payload = file.file.read()
+    try:
+        return backup.restore_bytes(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/update")
+def update_state():
+    from app import service
+
+    return service.latest_release()
+
+
+@app.post("/api/link/codes")
+def link_codes():
+    data = distant.backup_codes()
+    return data
+
+
+@app.get("/api/link/people")
+def link_people():
+    return distant.list_people()
+
+
+class PersonBody(BaseModel):
+    name: str
+    password: str
+    role: str = "use"
+
+
+@app.post("/api/link/people")
+def link_add_person(body: PersonBody):
+    try:
+        return distant.add_person(body.name, body.password, body.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/link/sessions")
+def link_sessions():
+    return distant.list_sessions()
+
+
+class SessionBody(BaseModel):
+    id: str = ""
+
+
+@app.post("/api/link/sessions")
+def link_drop_session(body: SessionBody):
+    try:
+        distant.drop_session(body.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 if __name__ == "__main__":

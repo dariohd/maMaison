@@ -2,6 +2,7 @@ const TITLES = {
   dashboard: "Maison",
   devices: "Appareils",
   scan: "Ajouter",
+  scenes: "Scènes",
   settings: "Réglages",
 };
 
@@ -51,9 +52,12 @@ const state = {
   viewer: null,
   viewerTimer: null,
   presets: [],
+  scenes: [],
+  schedules: [],
   pickHouse: false,
   chosenHouse: "",
   pending: new Set(),
+  confirmWait: "",
 };
 
 const viewEl = () => document.getElementById("view");
@@ -157,8 +161,17 @@ function typeIdByName(name) {
   return (other || state.types[0] || {}).id || "";
 }
 
+function phoneRole() {
+  return state.dashboard?.house?.role || "owner";
+}
+
+function canSetupPhone() {
+  return onHouseComputer() || phoneRole() === "owner" || phoneRole() === "setup";
+}
+
 function paintChrome() {
   document.body.classList.toggle("is-phone", !onHouseComputer());
+  document.body.classList.toggle("lite", Boolean(state.settings?.lite_ui));
   document.body.classList.toggle("is-setup", state.view === "link" || state.view === "login" || state.view === "install");
   document.querySelectorAll(".nav[data-view]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === state.view);
@@ -194,7 +207,48 @@ function commandOutcome(result) {
 function runButton(device, item, prominent) {
   const waiting = state.pending.has(commandKey(device.id, item.id));
   const cls = prominent ? "btn primary" : "btn";
-  return `<button type="button" class="${cls}" data-action="run-action" data-id="${device.id}" data-command="${item.id}" ${waiting ? "disabled" : ""}>${esc(waiting ? "En cours" : item.label)}</button>`;
+  const button = `<button type="button" class="${cls}" data-action="run-action" data-id="${device.id}" data-command="${item.id}" ${waiting ? "disabled" : ""}>${esc(waiting ? "En cours" : item.label)}</button>`;
+  if (item.value_kind === "level" || item.value_kind === "temp") {
+    const min = item.value_min ?? (item.value_kind === "temp" ? 5 : 0);
+    const max = item.value_max ?? (item.value_kind === "temp" ? 30 : 100);
+    const step = item.value_step ?? 1;
+    const current = item.value_kind === "temp" ? 20 : 50;
+    return `<span class="setpoint">${button}<input type="range" min="${min}" max="${max}" step="${step}" value="${current}" data-setpoint="${device.id}:${item.id}" aria-label="${esc(item.label)}"></span>`;
+  }
+  return button;
+}
+
+function findAction(deviceId, actionId) {
+  const lists = [
+    state.modal && state.modal.device,
+    ...(state.dashboard?.devices || []),
+    ...(state.devices || []),
+  ].filter(Boolean);
+  const device = lists.find((item) => String(item.id) === String(deviceId));
+  return ((device && device.actions) || []).find((item) => String(item.id) === String(actionId)) || null;
+}
+
+function collectRunBody(deviceId, actionId) {
+  const action = findAction(deviceId, actionId);
+  const body = {};
+  const slider = document.querySelector(`[data-setpoint="${deviceId}:${actionId}"]`);
+  if (slider) body.value = slider.value;
+  if (action && action.confirm === "tap") {
+    const key = commandKey(deviceId, actionId);
+    if (state.confirmWait === key) body.tap = true;
+  }
+  if (action && action.confirm === "totp") {
+    const otp = window.prompt("Les 6 chiffres");
+    if (!otp) return null;
+    body.otp = otp;
+  }
+  if (!slider && action && (action.value_kind === "level" || action.value_kind === "temp")) {
+    const hint = action.value_kind === "temp" ? "Température, par exemple 20" : "Niveau de 0 à 100";
+    const value = window.prompt(hint);
+    if (value == null || value === "") return null;
+    body.value = value;
+  }
+  return body;
 }
 
 function streamButton(device, item) {
@@ -208,7 +262,7 @@ function dailyCard(device) {
   const buttons = [
     calls[0] ? runButton(device, calls[0], true) : "",
     ...calls.slice(1).map((item) => runButton(device, item, false)),
-    ...streams.map((item) => streamButton(device, item)),
+    ...streams.map((item) => onHouseComputer() ? streamButton(device, item) : `<button type="button" class="btn" data-action="phone-picture" data-id="${device.id}" data-command="${item.id}">${esc(item.label)}</button>`),
   ].filter(Boolean).join("");
   const conflict = device.ip_conflict ? `<span class="badge warn">Même adresse qu'un autre</span>` : "";
   const empty = onHouseComputer()
@@ -218,7 +272,7 @@ function dailyCard(device) {
     <article class="device-card">
       <button type="button" class="name-btn" data-action="open-device" data-id="${device.id}">
         <span class="name-line"><i class="dot ${esc(device.state || "unknown")}"></i> ${esc(device.name)}${conflict}</span>
-        <span class="sub">${esc(device.type_name || "Appareil")} · ${esc(statusText(device))}</span>
+        <span class="sub">${esc(device.type_name || "Appareil")} · ${esc(statusText(device))}${device.reading ? ` · ${esc(device.reading)}` : ""}</span>
       </button>
       ${buttons ? `<div class="actions">${buttons}</div>` : empty}
     </article>
@@ -232,6 +286,9 @@ function roomsOf(devices) {
     const name = device.room_name || "Non classé";
     if (!groups.has(name)) groups.set(name, []);
     groups.get(name).push(device);
+  }
+  for (const list of groups.values()) {
+    list.sort((a, b) => (b.pinned || 0) - (a.pinned || 0) || a.name.localeCompare(b.name, "fr"));
   }
   return [...groups.keys()].sort((a, b) => {
     if (a === "Non classé") return 1;
@@ -266,9 +323,11 @@ function renderDashboard() {
   }
   const counts = data.counts || {};
   const house = data.house;
-  const houseNote = house && !house.online
-    ? `<p class="house-note">La maison ne répond pas. Allume l'ordinateur où maMaisonConnectee est installé, et laisse le programme ouvert.</p>`
-    : "";
+  const alerts = (data.alerts || []).map((item) => item.message).filter(Boolean);
+  const houseNote = [
+    house && !house.online ? `<p class="house-note">La maison ne répond pas. Allume l'ordinateur où maMaisonConnectee est installé, et laisse le programme ouvert.</p>` : "",
+    alerts.length ? `<p class="house-note">${esc(alerts[0])} <button type="button" class="btn" data-action="read-alerts">Vu</button></p>` : "",
+  ].join("");
   const unsure = (counts.degraded || 0) + (counts.unknown || 0);
   const devices = data.devices || [];
   const chips = [
@@ -458,7 +517,7 @@ function renderConflict(item) {
 function renderFresh(item) {
   const protocol = item.suggested_protocol || "ping";
   const port = item.suggested_port || "";
-  const name = item.hostname || `Appareil ${item.ip}`;
+  const name = item.suggested_name || item.hostname || `Appareil ${item.ip}`;
   return `
     <article class="scan-card" data-new-row data-ip="${esc(item.ip)}" data-mac="${esc(item.mac || "")}" data-hostname="${esc(item.hostname || "")}">
       <header>
@@ -532,6 +591,43 @@ function renderSettings() {
           <button type="button" class="btn" data-action="rotate-totp">Nouveau carré</button>
         </div>
       </details>
+      <details>
+        <summary>Codes de secours</summary>
+        <p class="help">Chaque code ne sert qu'une fois, à la place des 6 chiffres.</p>
+        <p class="help" id="codes-left" hidden></p>
+        <button type="button" class="btn" data-action="new-codes">Afficher de nouveaux codes</button>
+        <div id="backup-codes"></div>
+      </details>
+      <details>
+        <summary>Personnes de la maison</summary>
+        <form class="stack" data-form="add-person">
+          <label>Prénom <input name="name" required></label>
+          <label>Mot de passe <input type="password" name="password" required minlength="8"></label>
+          <label>Rôle
+            <select name="role">
+              <option value="use">Boutons</option>
+              <option value="setup">Réglages</option>
+            </select>
+          </label>
+          <button class="btn" type="submit">Ajouter</button>
+        </form>
+        <div id="people-list"></div>
+      </details>
+      <details>
+        <summary>Téléphones connectés</summary>
+        <div id="session-list"></div>
+      </details>
+      ${onHouseComputer() ? `
+      <details>
+        <summary>Sauvegarde</summary>
+        <a class="btn" href="/api/backup">Télécharger la maison</a>
+        <form data-form="restore">
+          <label>Restaurer <input type="file" name="file" accept=".zip"></label>
+          <button class="btn" type="submit">Restaurer</button>
+        </form>
+      </details>
+      <p class="help" id="update-line"></p>
+      ` : ""}
     </article>
     <div class="split">
       <form class="card stack" data-form="settings">
@@ -540,8 +636,23 @@ function renderSettings() {
         <details>
           <summary>Si la recherche ne trouve pas le bon Wi-Fi</summary>
           <div class="stack">
-            <label>Wi-Fi surveillé
-              <input name="subnet" class="mono" value="${esc(settings.subnet || "")}" placeholder="${esc(state.network?.suggested_subnet || "192.168.1.0/24")}" spellcheck="false">
+            <label>Wi-Fi surveillés, un par ligne
+              <textarea name="subnets" class="mono" rows="3" placeholder="${esc(state.network?.suggested_subnet || "192.168.1.0/24")}">${esc(settings.subnets || settings.subnet || "")}</textarea>
+            </label>
+            <label class="line"><input type="checkbox" name="autostart"${settings.autostart ? " checked" : ""}> Démarrer avec Windows</label>
+            <label class="line"><input type="checkbox" name="lite_ui"${settings.lite_ui ? " checked" : ""}> Écran plus léger</label>
+            <label>Courtier MQTT, facultatif
+              <input name="mqtt_host" value="${esc(settings.mqtt_host || "")}" spellcheck="false">
+            </label>
+            <label>Identifiant MQTT
+              <input name="mqtt_user" value="${esc(settings.mqtt_user || "")}" autocomplete="off">
+            </label>
+            <label>Mot de passe MQTT
+              <input name="mqtt_pass" type="password" placeholder="${settings.mqtt_set ? "inchangé" : "facultatif"}" autocomplete="new-password">
+            </label>
+            <label class="line"><input type="checkbox" name="mqtt_tls"${settings.mqtt_tls ? " checked" : ""}> MQTT avec TLS</label>
+            <label>Port MQTT
+              <input name="mqtt_port" type="number" value="${esc(settings.mqtt_port ?? 1883)}">
             </label>
             <label>Attente d'un appareil, en millisecondes
               <input name="ping_timeout_ms" type="number" min="200" max="1500" value="${esc(settings.ping_timeout_ms ?? 400)}">
@@ -590,6 +701,74 @@ function renderSettings() {
     </div>
   `;
   loadEntryCard();
+  loadHouseExtras();
+}
+
+async function loadHouseExtras() {
+  if (!onHouseComputer()) return;
+  try {
+    const people = await api("/api/link/people");
+    const slot = document.getElementById("people-list");
+    if (slot) slot.innerHTML = (people.people || []).map((item) => `<p>${esc(item.name)} · ${esc(item.role === "setup" ? "réglages" : "boutons")}</p>`).join("") || `<p class="quiet">Toi seulement pour l'instant.</p>`;
+    const left = document.getElementById("codes-left");
+    if (left) {
+      left.hidden = false;
+      left.textContent = `Il reste ${Number(people.codesLeft || 0)} code(s) de secours.`;
+    }
+  } catch (_err) {}
+  try {
+    const sessions = await api("/api/link/sessions");
+    const slot = document.getElementById("session-list");
+    if (slot) slot.innerHTML = (sessions.sessions || []).map((item) => `<p class="inline">${esc(item.person || "téléphone")} <button type="button" class="btn" data-action="drop-session" data-id="${esc(item.id)}">Fermer</button></p>`).join("") || `<p class="quiet">Aucun téléphone connecté.</p>`;
+  } catch (_err) {}
+  try {
+    const update = await api("/api/update");
+    const line = document.getElementById("update-line");
+    if (line) line.innerHTML = update.newer
+      ? `Une version ${esc(update.latest)} est prête. <a href="${esc(update.download)}">Télécharger</a>`
+      : `Version ${esc(update.version)}.`;
+  } catch (_err) {}
+}
+
+function renderScenes() {
+  const scenes = state.scenes || [];
+  const schedules = state.dashboard?.schedules || state.schedules || [];
+  viewEl().innerHTML = `
+    <div class="stack">
+      ${scenes.map((scene) => `
+        <article class="card stack">
+          <h2>${esc(scene.name)}</h2>
+          <p class="quiet">${(scene.steps || []).map((step) => esc(step.device_name + " · " + (step.action_label || ""))).join(", ") || "Aucun bouton"}</p>
+          <div class="actions">
+            <button type="button" class="btn primary" data-action="run-scene" data-id="${scene.id}">Lancer</button>
+            ${onHouseComputer() ? `<button type="button" class="btn" data-action="delete-scene" data-id="${scene.id}">Retirer</button>` : ""}
+          </div>
+        </article>
+      `).join("") || `<p class="empty">Pas encore de scène.</p>`}
+      ${schedules.length ? `<h2>Horaires</h2>${schedules.map((item) => `
+        <p class="inline">${esc(item.scene_name || "")} · ${esc(item.hhmm)} ${onHouseComputer() ? `<button type="button" class="btn" data-action="delete-schedule" data-id="${item.id}">Retirer</button>` : ""}</p>
+      `).join("")}` : ""}
+      ${onHouseComputer() ? `
+        <form class="card stack" data-form="scene">
+          <h2>Nouvelle scène</h2>
+          <label>Nom <input name="name" required></label>
+          <p class="help">Coche les boutons à enchaîner.</p>
+          ${(state.devices || []).map((device) => (device.actions || []).filter((item) => item.kind !== "stream").map((item) => `
+            <label class="line"><input type="checkbox" name="step" value="${device.id}:${item.id}"> ${esc(device.name)} · ${esc(item.label)}</label>
+          `).join("")).join("")}
+          <button class="btn primary" type="submit">Enregistrer</button>
+        </form>
+        <form class="card stack" data-form="schedule">
+          <h2>Horaire</h2>
+          <label>Scène <select name="scene_id">${(scenes).map((item) => `<option value="${item.id}">${esc(item.name)}</option>`).join("")}</select></label>
+          <label>Heure <input name="hhmm" placeholder="07:30" required></label>
+          <label>Jours <input name="days" value="1234567"></label>
+          <p class="help">1 est lundi. L'horaire ne part pas si cet ordinateur est éteint.</p>
+          <button class="btn" type="submit">Ajouter</button>
+        </form>
+      ` : ""}
+    </div>
+  `;
 }
 
 function render() {
@@ -601,6 +780,7 @@ function render() {
   if (state.view === "dashboard") renderDashboard();
   else if (state.view === "devices") renderDevices();
   else if (state.view === "scan") renderScan();
+  else if (state.view === "scenes") renderScenes();
   else renderSettings();
   renderModal();
 }
@@ -631,7 +811,31 @@ function renderModal() {
   document.body.classList.add("modal-open");
   const device = state.modal.device;
   const history = state.modal.history || [];
+  const log = state.modal.log || [];
   const pageable = device.protocol === "http" || device.protocol === "https";
+  if (!onHouseComputer() && device.id) {
+    const historyBlock = history.length ? `<div><p>Adresses précédentes</p><ul class="history">${history.map(historyItem).join("")}</ul></div>` : "";
+    root.innerHTML = `
+      <div class="backdrop" data-action="close-modal">
+        <div class="panel stack" data-action="stop">
+          <form class="stack" id="device-form" data-form="device">
+            <h2>${esc(device.name || "Appareil")}</h2>
+            ${canSetupPhone() ? `
+              <label>Nom <input name="name" value="${esc(device.name)}" required></label>
+              <label>Pièce <select name="room_id">${options(state.rooms, device.room_id, "Sans pièce")}</select></label>
+            ` : `<p class="quiet">${esc(device.name || "Appareil")}</p>`}
+            <p class="help">${esc(statusText(device))}${device.reading ? ` · ${esc(device.reading)}` : ""}</p>
+            ${historyBlock}
+            <div class="actions">
+              ${canSetupPhone() ? `<button class="btn primary" type="submit">Enregistrer</button>` : ""}
+              <button class="btn" type="button" data-action="close-modal">Fermer</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+    return;
+  }
   const advanced = Boolean(
     (device.protocol && device.protocol !== "ping")
     || device.port
@@ -666,6 +870,22 @@ function renderModal() {
               <input name="mac" class="mono" value="${esc(device.mac || "")}" spellcheck="false" placeholder="facultatif">
             </label>
             <label>Note <textarea name="notes" rows="2">${esc(device.notes || "")}</textarea></label>
+            <label class="line"><input type="checkbox" name="pinned"${device.pinned ? " checked" : ""}> Épingler en haut de la pièce</label>
+            <label class="line"><input type="checkbox" name="important"${device.important ? " checked" : ""}> Prévenir s'il disparaît</label>
+            <label>État lu
+              <select name="reading_kind">
+                <option value="">Pas de lecture</option>
+                <option value="on"${device.reading_kind === "on" ? " selected" : ""}>Marche ou arrêt</option>
+                <option value="position"${device.reading_kind === "position" ? " selected" : ""}>Position</option>
+                <option value="temperature"${device.reading_kind === "temperature" ? " selected" : ""}>Température</option>
+              </select>
+            </label>
+            <label>Chemin de lecture <input name="reading_path" class="mono" value="${esc(device.reading_path || "")}" placeholder="/status"></label>
+            <label>MQTT, sujet <input name="mqtt_topic" value="${esc(device.mqtt_topic || "")}"></label>
+            <input type="hidden" name="transport" value="${esc(device.transport || "http")}">
+            ${device.cert_seen && device.cert_seen !== (device.cert_fp || "") ? `<p class="form-error">${device.cert_fp ? "Le certificat HTTPS a changé." : "Nouveau certificat HTTPS."} Les commandes sont bloquées jusqu'à confirmation.</p><button type="button" class="btn" data-action="trust-cert" data-id="${device.id}">Confirmer ce certificat</button>` : ""}
+            ${device.id ? `<button type="button" class="btn" data-action="guess-paths" data-id="${device.id}">Chercher les chemins qui répondent</button>` : ""}
+            ${device.id ? `<button type="button" class="btn" data-action="pull-bridge" data-id="${device.id}">Lire les appareils de ce pont</button>` : ""}
             ${history.length ? `<div><p>Adresses précédentes</p><ul class="history">${history.map(historyItem).join("")}</ul></div>` : ""}
           </div>
         </details>
@@ -681,6 +901,7 @@ function renderModal() {
         </div>
       </form>
       <section id="commands" class="stack">${commandsInner(device)}</section>
+      ${log.length ? `<details><summary>Derniers boutons</summary><ul class="history">${log.map((item) => `<li>${esc(item.label)} · ${item.ok ? "ok" : "échec"} · ${esc(ago(item.created_at))}</li>`).join("")}</ul></details>` : ""}
       </div>
     </div>
   `;
@@ -699,7 +920,9 @@ function presetOptions() {
 function methodOptions(kind, selected) {
   const items = kind === "stream"
     ? [["mjpeg", "MJPEG"], ["snapshot", "Image"], ["rtsp", "RTSP"]]
-    : [["GET", "GET"], ["POST", "POST"], ["PUT", "PUT"], ["PATCH", "PATCH"], ["DELETE", "DELETE"]];
+    : kind === "mqtt"
+      ? [["PUB", "Publier"]]
+      : [["GET", "GET"], ["POST", "POST"], ["PUT", "PUT"], ["PATCH", "PATCH"], ["DELETE", "DELETE"]];
   return items.map(([value, label]) => {
     const selectedAttr = value === selected ? " selected" : "";
     return `<option value="${value}"${selectedAttr}>${label}</option>`;
@@ -730,6 +953,7 @@ function commandsInner(device) {
               <select class="cmd-kind">
                 <option value="http"${item.kind === "http" ? " selected" : ""}>Bouton</option>
                 <option value="stream"${item.kind === "stream" ? " selected" : ""}>Image</option>
+                <option value="mqtt"${item.kind === "mqtt" ? " selected" : ""}>MQTT</option>
               </select>
             </label>
             <label>Envoi <select class="cmd-method">${methodOptions(item.kind, item.method)}</select></label>
@@ -739,6 +963,20 @@ function commandsInner(device) {
           <div class="grid-2">
             <label>Identifiant, si l'appareil le demande <input class="cmd-user" value="${esc(item.auth_user || "")}" autocomplete="off"></label>
             <label>Mot de passe <input class="cmd-pass" type="password" value="${esc(item.auth_pass || "")}" autocomplete="off"></label>
+            <label>Confirmation
+              <select class="cmd-confirm">
+                <option value="">Aucune</option>
+                <option value="tap"${item.confirm === "tap" ? " selected" : ""}>Second appui</option>
+                <option value="totp"${item.confirm === "totp" ? " selected" : ""}>6 chiffres</option>
+              </select>
+            </label>
+            <label>Curseur
+              <select class="cmd-value">
+                <option value="">Non</option>
+                <option value="level"${item.value_kind === "level" ? " selected" : ""}>Niveau</option>
+                <option value="temp"${item.value_kind === "temp" ? " selected" : ""}>Température</option>
+              </select>
+            </label>
           </div>
         </div>
       </details>
@@ -772,6 +1010,11 @@ function commandPayload(row) {
     body: kind === "stream" ? "" : row.querySelector(".cmd-body").value,
     auth_user: row.querySelector(".cmd-user").value,
     auth_pass: row.querySelector(".cmd-pass").value,
+    confirm: row.querySelector(".cmd-confirm")?.value || "",
+    value_kind: row.querySelector(".cmd-value")?.value || "",
+    value_min: row.querySelector(".cmd-value")?.value === "temp" ? 5 : 0,
+    value_max: row.querySelector(".cmd-value")?.value === "temp" ? 30 : 100,
+    value_step: 1,
   };
 }
 
@@ -829,7 +1072,9 @@ function renderViewer() {
 }
 
 function historyItem(item) {
-  const from = item.old_ip ? `${item.old_ip} vers ${item.new_ip}` : item.new_ip;
+  let from = "Adresse changée";
+  if (item.old_ip && item.new_ip) from = `${item.old_ip} vers ${item.new_ip}`;
+  else if (item.new_ip) from = item.new_ip;
   return `<li><span class="mono">${esc(from)}</span> <span class="quiet">${esc(SOURCE[item.source] || item.source)}, ${esc(ago(item.changed_at))}</span></li>`;
 }
 
@@ -855,6 +1100,12 @@ function formDevice(form) {
     http_path: data.http_path || "/",
     notes: data.notes || "",
     force: Boolean(state.modal && state.modal.conflict),
+    pinned: Boolean(form.querySelector("[name=pinned]")?.checked),
+    important: Boolean(form.querySelector("[name=important]")?.checked),
+    reading_kind: data.reading_kind || "",
+    reading_path: data.reading_path || "",
+    mqtt_topic: data.mqtt_topic || "",
+    transport: data.transport || "http",
   };
 }
 
@@ -874,7 +1125,7 @@ function pageUrl(fields) {
 }
 
 async function hydrate() {
-  const [devices, types, rooms, settings, network, dashboard, presets] = await Promise.all([
+  const [devices, types, rooms, settings, network, dashboard, presets, scenes, schedules] = await Promise.all([
     api("/api/devices"),
     api("/api/types"),
     api("/api/rooms"),
@@ -882,6 +1133,8 @@ async function hydrate() {
     api("/api/network"),
     api("/api/dashboard"),
     api("/api/presets"),
+    api("/api/scenes").catch(() => []),
+    api("/api/schedules").catch(() => []),
   ]);
   state.devices = devices;
   state.types = types;
@@ -890,14 +1143,17 @@ async function hydrate() {
   state.network = network;
   state.dashboard = dashboard;
   state.presets = presets;
+  state.scenes = scenes;
+  state.schedules = schedules;
 }
 
 async function openDevice(id) {
-  const [device, history] = await Promise.all([
+  const [device, history, log] = await Promise.all([
     api(`/api/devices/${id}`),
-    api(`/api/devices/${id}/history`),
+    api(`/api/devices/${id}/history`).catch(() => []),
+    api(`/api/devices/${id}/commands`).catch(() => []),
   ]);
-  state.modal = { device, history, error: "", test: null, conflict: false };
+  state.modal = { device, history, log, error: "", test: null, conflict: false };
   renderModal();
 }
 
@@ -917,8 +1173,19 @@ async function refreshView() {
 }
 
 async function saveDevice(form) {
-  const body = formDevice(form);
   const id = state.modal.device.id;
+  if (!onHouseComputer()) {
+    const data = Object.fromEntries(new FormData(form).entries());
+    const result = await finishCommand(await api(`/api/devices/${id}`, {
+      method: "PUT",
+      body: { name: data.name, room_id: data.room_id || null },
+    }));
+    toast(commandOutcome(result));
+    state.modal = null;
+    await refreshView();
+    return;
+  }
+  const body = formDevice(form);
   try {
     const saved = await api(id ? `/api/devices/${id}` : "/api/devices", {
       method: id ? "PUT" : "POST",
@@ -1087,6 +1354,110 @@ document.body.addEventListener("click", async (event) => {
     renderLogin();
     return;
   }
+  if (action === "read-alerts") {
+    try {
+      await api("/api/alerts/read", { method: "POST", body: {} });
+      await refreshView();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "new-codes") {
+    try {
+      const fresh = await api("/api/link/codes", { method: "POST", body: {} });
+      const slot = document.getElementById("backup-codes");
+      if (slot) slot.innerHTML = `<p class="secret-key">${esc((fresh.codes || []).join("  "))}</p><p class="help">Note-les maintenant. Ils ne seront plus réaffichés.</p>`;
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "drop-session") {
+    try {
+      await api("/api/link/sessions", { method: "POST", body: { id: el.dataset.id } });
+      toast("Session fermée.");
+      await loadHouseExtras();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "trust-cert") {
+    try {
+      await api(`/api/devices/${el.dataset.id}/trust-cert`, { method: "POST", body: {} });
+      toast("Certificat enregistré.");
+      if (state.modal && state.modal.device) await openDevice(el.dataset.id);
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "guess-paths") {
+    try {
+      const found = await api(`/api/devices/${el.dataset.id}/guess`, { method: "POST", body: {} });
+      const ok = (found || []).filter((item) => item.ok);
+      toast(ok.map((item) => item.path).join(", ") || "Aucun chemin n'a répondu.");
+      const input = document.querySelector("[name=http_path]");
+      if (input && ok[0]) input.value = ok[0].path;
+      if (state.modal && state.modal.device) {
+        const device = await api(`/api/devices/${el.dataset.id}`);
+        state.modal.device = device;
+        paintCommands();
+      }
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "pull-bridge") {
+    try {
+      const result = await api(`/api/devices/${el.dataset.id}/bridge`, { method: "POST", body: {} });
+      toast(`${(result.created || []).length} appareil(s) ajouté(s).`);
+      await refreshView();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "run-scene") {
+    try {
+      const scene = (state.scenes || []).find((item) => String(item.id) === String(el.dataset.id));
+      const sensitive = ((scene && scene.steps) || []).some((item) => item.confirm === "totp" || item.confirm === "tap");
+      const body = {};
+      if (sensitive) {
+        const otp = window.prompt("Les 6 chiffres");
+        if (!otp) return;
+        body.otp = otp;
+      }
+      const result = await finishCommand(await api(`/api/scenes/${el.dataset.id}/run`, { method: "POST", body }));
+      toast(commandOutcome(result));
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "delete-scene") {
+    try {
+      await api(`/api/scenes/${el.dataset.id}`, { method: "DELETE" });
+      await refreshView();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+  if (action === "phone-picture") {
+    try {
+      const result = await finishCommand(await api(`/api/devices/${el.dataset.id}/actions/${el.dataset.command}/picture`, { method: "POST", body: {} }));
+      if (result.image) {
+        state.viewer = { src: `data:${result.mime || "image/jpeg"};base64,${result.image}`, label: "Image" };
+        renderViewer();
+      } else toast(commandOutcome(result));
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
   if (action === "disconnect-phones") {
     try {
       await api("/api/link/phones", { method: "POST", body: {} });
@@ -1141,9 +1512,20 @@ document.body.addEventListener("click", async (event) => {
     closeViewer();
     return;
   }
+  if (action === "delete-schedule") {
+    try {
+      await api(`/api/schedules/${el.dataset.id}`, { method: "DELETE" });
+      await refreshView();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
   if (action === "run-action") {
     const key = commandKey(el.dataset.id, el.dataset.command);
     if (state.pending.has(key)) return;
+    const payload = collectRunBody(el.dataset.id, el.dataset.command);
+    if (payload === null) return;
     const label = el.textContent;
     state.pending.add(key);
     const onBoard = state.view === "dashboard" && !state.modal;
@@ -1153,7 +1535,13 @@ document.body.addEventListener("click", async (event) => {
       el.textContent = "En cours";
     }
     try {
-      const result = await finishCommand(await api(`/api/devices/${el.dataset.id}/actions/${el.dataset.command}/run`, { method: "POST", body: {} }));
+      const result = await finishCommand(await api(`/api/devices/${el.dataset.id}/actions/${el.dataset.command}/run`, { method: "POST", body: payload }));
+      if (result && result.need === "tap") {
+        state.confirmWait = key;
+        toast("Appuie encore pour confirmer.");
+        return;
+      }
+      state.confirmWait = "";
       toast(commandOutcome(result));
     } catch (error) {
       toast(error.message);
@@ -1369,10 +1757,18 @@ document.body.addEventListener("submit", async (event) => {
       state.settings = await api("/api/settings", {
         method: "PUT",
         body: {
-          subnet: data.subnet || "",
+          subnet: (data.subnets || data.subnet || "").split(/\n/)[0] || "",
+          subnets: data.subnets || data.subnet || "",
           ping_timeout_ms: Number(data.ping_timeout_ms),
           poll_interval_s: Number(data.poll_interval_s),
           http_timeout_s: Number(data.http_timeout_s),
+          mqtt_host: data.mqtt_host || "",
+          mqtt_port: Number(data.mqtt_port || 1883),
+          mqtt_user: data.mqtt_user || "",
+          mqtt_tls: Boolean(form.querySelector("[name=mqtt_tls]")?.checked),
+          lite_ui: Boolean(form.querySelector("[name=lite_ui]")?.checked),
+          autostart: Boolean(form.querySelector("[name=autostart]")?.checked),
+          ...(data.mqtt_pass ? { mqtt_pass: data.mqtt_pass } : {}),
         },
       });
       toast("C'est enregistré.");
@@ -1384,6 +1780,43 @@ document.body.addEventListener("submit", async (event) => {
       if (kind === "add-type") await api("/api/types", { method: "POST", body: { name } });
       else await api(`/api/types/${form.dataset.id}`, { method: "PUT", body: { name } });
       await refreshView();
+      return;
+    }
+    if (kind === "add-person") {
+      const data = Object.fromEntries(new FormData(form).entries());
+      const person = await api("/api/link/people", { method: "POST", body: { name: data.name, password: data.password, role: data.role || "use" } });
+      toast("Personne ajoutée. Scanne le carré maintenant, il ne sera plus réaffiché.");
+      const slot = document.getElementById("people-list");
+      if (slot && person.qr) slot.innerHTML = `<div class="qr">${qrMarkup(person.qr)}</div><p class="secret-key">${esc(person.secret || "")}</p><p class="help">Note ce carré maintenant.</p>` + slot.innerHTML;
+      return;
+    }
+    if (kind === "restore") {
+      const file = form.querySelector("input[type=file]")?.files?.[0];
+      if (!file) {
+        toast("Choisis le fichier de sauvegarde.");
+        return;
+      }
+      const sent = await fetch("/api/backup", { method: "POST", body: (() => { const payload = new FormData(); payload.append("file", file); return payload; })() });
+      if (!sent.ok) throw new Error("La restauration a échoué.");
+      toast("Maison restaurée.");
+      await boot();
+      return;
+    }
+    if (kind === "scene") {
+      const data = new FormData(form);
+      const steps = [...form.querySelectorAll("[name=step]:checked")].map((item) => {
+        const [device_id, action_id] = item.value.split(":");
+        return { device_id: Number(device_id), action_id: Number(action_id) };
+      });
+      await api("/api/scenes", { method: "POST", body: { name: data.get("name"), steps } });
+      toast("Scène enregistrée.");
+      await refreshView();
+      return;
+    }
+    if (kind === "schedule") {
+      const data = Object.fromEntries(new FormData(form).entries());
+      await api("/api/schedules", { method: "POST", body: { scene_id: Number(data.scene_id), hhmm: data.hhmm, days: data.days } });
+      toast("Horaire enregistré.");
       return;
     }
     if (kind === "add-room" || kind === "rename-room") {
@@ -1550,6 +1983,7 @@ function rememberSetup(linked) {
     house: linked.house || "",
     secret: linked.secret || "",
     qr: linked.qr || "",
+    codes: linked.codes || [],
     confirmed: Boolean(linked.confirmed),
   };
   sessionStorage.setItem("maison-setup", JSON.stringify(pending));
@@ -1566,8 +2000,11 @@ function pendingSetup() {
 }
 
 function qrMarkup(svg) {
-  if (typeof svg !== "string" || !svg.includes("<svg") || svg.toLowerCase().includes("<script")) return "";
-  return svg;
+  if (typeof svg !== "string") return "";
+  const clean = svg.trim();
+  if (!clean.toLowerCase().startsWith("<svg")) return "";
+  if (/on\w+\s*=|script|javascript:|foreignObject|<image|<use|<iframe|<object|<embed/i.test(clean)) return "";
+  return clean;
 }
 
 function renderReady(linked) {
@@ -1678,6 +2115,7 @@ async function renderPhone() {
       <p>Avec l'appareil photo, scanne ce carré. La page s'ouvre. Tape le mot de passe, puis les 6 chiffres.</p>
       <div class="qr" id="entry-qr"></div>
       <p class="house-code" id="entry-code">${esc(state.houseCode || "")}</p>
+      ${(pendingSetup() && pendingSetup().codes && pendingSetup().codes.length) ? `<p class="help">Range ces codes de secours. Chacun ne sert qu'une fois, à la place des 6 chiffres.</p><p class="secret-key">${esc((pendingSetup().codes || []).join("  "))}</p>` : ""}
       <p class="help">Ce carré n'ouvre pas la maison tout seul. Le mot de passe et les 6 chiffres du moment restent demandés.</p>
       <button type="button" class="btn primary" id="setup-done">C'est fait</button>
     </article>`;
@@ -1727,7 +2165,7 @@ function renderLogin() {
       </form>
       ${others.length ? `<div class="chips">${others.map((item) => `<button type="button" class="chip" data-action="pick-saved-house" data-house="${esc(item)}">${esc(item)}</button>`).join("")}</div>` : ""}
       ${askCode ? "" : `<button type="button" class="btn" data-action="other-house">Autre maison</button>`}
-      <p class="help">Chaque maison a son mot de passe. Il n'est pas enregistré dans le téléphone. Cinq erreurs ferment l'entrée pendant 15 minutes.</p>
+      <p class="help">Chaque maison a son mot de passe. Un code de secours peut remplacer les 6 chiffres, une seule fois. Cinq erreurs ferment l'entrée pendant 15 minutes.</p>
     </article>`;
   document.getElementById("login-form").addEventListener("submit", async (event) => {
     event.preventDefault();

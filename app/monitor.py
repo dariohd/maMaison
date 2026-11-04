@@ -13,14 +13,14 @@ _thread: threading.Thread | None = None
 _last_sweep = 0.0
 
 
-def _network():
-    raw = (db.get_settings().get("subnet") or "").strip()
+def _networks():
+    raw = (db.get_settings().get("subnets") or db.get_settings().get("subnet") or "").strip()
     if raw:
         try:
-            return scanner.parse_subnet(raw)
+            return scanner.parse_subnets(raw)
         except ValueError:
-            return None
-    networks = set()
+            return []
+    found = set()
     for device in db.list_devices():
         try:
             addr = ipaddress.ip_address(device["ip"])
@@ -28,10 +28,13 @@ def _network():
             continue
         network = ipaddress.ip_network(f"{addr}/24", strict=False)
         if isinstance(network, ipaddress.IPv4Network) and scanner.is_home_network(network):
-            networks.add(network)
-    if len(networks) == 1:
-        return next(iter(networks))
-    return None
+            found.add(network)
+    return list(found)
+
+
+def _network():
+    nets = _networks()
+    return nets[0] if len(nets) == 1 else None
 
 
 def _mark_impostors(devices: list[dict], arp: dict[str, str]) -> None:
@@ -100,8 +103,8 @@ def check_all() -> int:
     if not _lock.acquire(blocking=False):
         return 0
     try:
-        network = _network()
-        if network is not None:
+        previous = {item["id"]: item.get("state") for item in db.list_devices()}
+        for network in _networks():
             try:
                 _recover(network)
             except Exception:
@@ -133,18 +136,72 @@ def check_all() -> int:
 
         with ThreadPoolExecutor(max_workers=32) as pool:
             for device_id, result in pool.map(one, devices):
+                before = previous.get(device_id)
                 db.save_status(device_id, result)
-        if network is not None and not scanner.scan_running():
-            arp = scanner.arp_table(network)
+                if before == "online" and result.get("state") == "offline":
+                    device = db.get_device(device_id)
+                    if device and device.get("important"):
+                        db.add_alert(device_id, f"{device['name']} ne répond plus.")
+        from app import readings
+
+        for device in db.list_devices():
+            if device.get("reading_path") and device.get("state") == "online":
+                try:
+                    readings.refresh_device(device)
+                except Exception:
+                    log.exception("lecture %s", device.get("ip"))
+            if device.get("protocol") == "https":
+                try:
+                    from app import commands
+
+                    fp = commands.fingerprint(device)
+                    if fp:
+                        trusted, changed = db.note_cert(device["id"], fp)
+                        if changed:
+                            if trusted:
+                                db.add_alert(device["id"], f"Le certificat de {device['name']} a changé.")
+                            else:
+                                db.add_alert(device["id"], f"Confirme le certificat de {device['name']}.")
+                except Exception:
+                    log.exception("certificat %s", device.get("ip"))
+        if not scanner.scan_running():
+            arp = {}
+            for network in _networks():
+                arp.update(scanner.arp_table(network))
             moved = db.retarget_by_mac(arp)
+            missing_host = [item for item in db.list_devices() if item.get("hostname") and not item.get("mac")]
+            if missing_host:
+                host_map = {}
+                for ip in list(arp)[:40]:
+                    name = (scanner.lookup_name(ip) or "").lower()
+                    if name:
+                        host_map[name.split(".")[0]] = ip
+                        host_map[name] = ip
+                moved.extend(db.retarget_by_hostname(host_map))
             if moved:
                 _recheck([item["id"] for item in moved])
                 devices = db.list_devices()
-                arp = scanner.arp_table(network)
+                arp = {}
+                for network in _networks():
+                    arp.update(scanner.arp_table(network))
             _mark_impostors(devices, arp)
+        _run_due_schedules()
         return len(devices)
     finally:
         _lock.release()
+
+
+def _run_due_schedules() -> None:
+    stamp = db.now()
+    weekday = str(__import__("datetime").datetime.now().isoweekday())
+    for item in db.due_schedules(stamp, weekday):
+        from app import scenes
+
+        try:
+            scenes.run_scene(item["scene_id"], source="horaire")
+            db.mark_schedule_run(item["id"], stamp[:16])
+        except Exception:
+            log.exception("horaire %s", item.get("id"))
 
 
 def kick() -> bool:
@@ -155,14 +212,19 @@ def kick() -> bool:
 
 
 def _loop() -> None:
+    last_check = 0.0
     while not _stop.is_set():
+        interval = max(10, min(db.get_int_setting("poll_interval_s", 30), 3600))
+        now = time.time()
         try:
-            check_all()
+            if now - last_check >= interval:
+                check_all()
+                last_check = now
+            else:
+                _run_due_schedules()
         except Exception:
             log.exception("cycle de contrôle")
-        interval = db.get_int_setting("poll_interval_s", 30)
-        interval = max(10, min(interval, 3600))
-        if _stop.wait(interval):
+        if _stop.wait(min(30, interval)):
             return
 
 
@@ -176,4 +238,10 @@ def start() -> None:
 
 
 def stop() -> None:
+    global _thread
     _stop.set()
+    if _thread is not None:
+        _thread.join(timeout=5)
+        _thread = None
+    if _lock.acquire(timeout=8):
+        _lock.release()

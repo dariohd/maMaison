@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
-import { hashPassword, hashToken, newToken } from "../lib/secrets.js";
-import { formatHouse, load, newHouseId, save } from "../lib/store.js";
+import { backupCodes, hashPassword, hashToken, newToken } from "../lib/secrets.js";
+import { hide } from "../lib/box.js";
+import { allowHouseCreate, formatHouse, load, newHouseId, save } from "../lib/store.js";
 import { generateSecret, otpauth } from "../lib/totp.js";
 
 const PUBLIC_URL = "https://mamaisonconnectee.vercel.app";
@@ -29,6 +30,15 @@ export default async function handler(req, res) {
     send(res, 405, { detail: "Méthode refusée" });
     return;
   }
+  if (!process.env.SESSION_SECRET) {
+    send(res, 503, { detail: "La page publique n'est pas prête." });
+    return;
+  }
+  const ip = String(req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || "").split(",")[0].trim();
+  if (!(await allowHouseCreate(ip))) {
+    send(res, 429, { detail: "Trop de maisons créées. Réessaie plus tard." });
+    return;
+  }
   const password = String(readBody(req).password || "");
   if (password.length < 8) {
     send(res, 400, { detail: "Le mot de passe doit contenir au moins 8 caractères." });
@@ -53,12 +63,13 @@ export default async function handler(req, res) {
   }
   const token = newToken();
   const secret = generateSecret();
+  const codes = backupCodes();
   const code = formatHouse(id);
   await save({
     id,
     passwordHash: hashPassword(password),
     agentTokenHash: hashToken(token),
-    totpSecret: secret,
+    totpSecret: hide(secret),
     totpReady: false,
     lastTotpStep: 0,
     loginFailures: 0,
@@ -68,7 +79,10 @@ export default async function handler(req, res) {
     snapshot: null,
     seenAt: 0,
     queue: [],
+    backupCodes: codes.hashes,
+    people: [],
+    sessions: [],
   });
   const qr = await QRCode.toString(otpauth(secret, code), { type: "svg", margin: 1, width: 220 });
-  send(res, 200, { id, code, token, url: PUBLIC_URL, secret, qr });
+  send(res, 200, { id, code, token, url: PUBLIC_URL, secret, qr, codes: codes.raw });
 }
